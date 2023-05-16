@@ -6,8 +6,7 @@
 
 #define MAX_MOTORS  12
 #define MAX_SERVOS  8
-#define MAX_PWM_INPUTS  8
-#define MAX_PPM_INPUTS 16
+#define MAX_INPUTS  8
 #define PULSE_1MS   (1000)      // 1ms pulse width
 #define PULSE_MIN   (750)       // minimum PWM pulse width which is considered valid
 #define PULSE_MAX   (2250)      // maximum PWM pulse width which is considered valid
@@ -24,13 +23,11 @@ typedef struct drv_pwm_config_t {
     uint8_t adcChannel;  // steal one RC input for current sensor
     uint16_t motorPwmRate;
     uint16_t servoPwmRate;
-    uint16_t idlePulse;  // PWM value to use when initializing the driver. set this to either PULSE_1MS (regular pwm),
-    // some higher value (used by 3d mode), or 0, for brushed pwm drivers.
+    uint16_t idlePulse;  // PWM value to use when initializing the driver. set this to either PULSE_1MS (regular pwm), 
+                         // some higher value (used by 3d mode), or 0, for brushed pwm drivers.
     uint16_t servoCenterPulse;
     uint16_t failsafeThreshold;
-    bool syncPWM;
-    bool fastPWM;
-
+    
     // OUT parameters, filled by driver
     uint8_t numServos;
 } drv_pwm_config_t;

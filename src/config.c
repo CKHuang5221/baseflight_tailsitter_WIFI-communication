@@ -20,11 +20,13 @@
 // if sizeof(mcfg) is over this number, compile-time error will occur. so, need to add another page to config data.
 #define CONFIG_SIZE                     (FLASH_PAGE_SIZE * 2)
 
+#define GPS
+
 master_t mcfg;  // master config struct with data independent from profiles
 config_t cfg;   // profile config struct
-const char rcChannelLetters[] = "AERT123456789LMNOP";  // hack for the char-based channel mapping stuff, 18 channels hard max
+const char rcChannelLetters[] = "AERT1234";
 
-static const uint8_t EEPROM_CONF_VERSION = 76;
+static const uint8_t EEPROM_CONF_VERSION = 73;
 static uint32_t enabledSensors = 0;
 static void resetConf(void);
 static const uint32_t FLASH_WRITE_ADDR = 0x08000000 + (FLASH_PAGE_SIZE * (FLASH_PAGE_COUNT - (CONFIG_SIZE / 1024)));
@@ -103,7 +105,7 @@ void activateConfig(void)
         lookupThrottleRC[i] = mcfg.minthrottle + (int32_t)(mcfg.maxthrottle - mcfg.minthrottle) * lookupThrottleRC[i] / 1000; // [MINTHROTTLE;MAXTHROTTLE]
     }
 
-    setPIDController(cfg.pidController);
+    //setPIDController(cfg.pidController);
 #ifdef GPS
     gpsSetPIDs();
 #endif
@@ -185,19 +187,24 @@ static void resetConf(void)
     memset(&cfg, 0, sizeof(config_t));
 
     mcfg.version = EEPROM_CONF_VERSION;
-    mcfg.mixerConfiguration = MULTITYPE_QUADX;
+    mcfg.mixerConfiguration = MULTITYPE_FLYING_WING;
     featureClearAll();
 #ifdef CJMCU
     featureSet(FEATURE_PPM);
 #else
     featureSet(FEATURE_VBAT);
+
+    //------------20221101 for wifi
+    featureSet(FEATURE_GPS);
+    //------------20221101
+
 #endif
 
     // global settings
     mcfg.current_profile = 0;       // default profile
-    mcfg.gyro_cmpf_factor = 600;    // default MWC
-    mcfg.gyro_cmpfm_factor = 250;   // default MWC
-    mcfg.gyro_lpf = 42;             // supported by all gyro drivers now. In case of ST gyro, will default to 32Hz instead
+    mcfg.gyro_cmpf_factor = 1024;    // default MWC 600
+    mcfg.gyro_cmpfm_factor = 512;   // default MWC 250
+    mcfg.gyro_lpf = 10;             // supported by all gyro drivers now. In case of ST gyro, will default to 32Hz instead 42
     mcfg.accZero[0] = 0;
     mcfg.accZero[1] = 0;
     mcfg.accZero[2] = 0;
@@ -220,9 +227,9 @@ static void resetConf(void)
     mcfg.power_adc_channel = 0;
     mcfg.serialrx_type = 0;
     mcfg.spektrum_sat_bind = 0;
-    mcfg.telemetry_provider = TELEMETRY_PROVIDER_FRSKY;
-    mcfg.telemetry_port = TELEMETRY_PORT_UART;
-    mcfg.telemetry_switch = 0;
+//    mcfg.telemetry_provider = TELEMETRY_PROVIDER_FRSKY;
+//    mcfg.telemetry_port = TELEMETRY_PORT_UART;
+//    mcfg.telemetry_switch = 0;
     mcfg.midrc = 1500;
     mcfg.mincheck = 1100;
     mcfg.maxcheck = 1900;
@@ -241,21 +248,29 @@ static void resetConf(void)
     mcfg.servo_pwm_rate = 50;
     // safety features
     mcfg.auto_disarm_board = 5; // auto disarm after 5 sec if motors not started or disarmed
+
+//---------------20220904
     // gps/nav stuff
-    mcfg.gps_type = GPS_NMEA;
+    mcfg.gps_type = GPS_UBLOX;
     mcfg.gps_baudrate = GPS_BAUD_115200;
+    mcfg.spektrum_sat_on_flexport = 1;
+//---------------20220904
+
     // serial (USART1) baudrate
     mcfg.serial_baudrate = 115200;
     mcfg.softserial_baudrate = 9600;
     mcfg.softserial_1_inverted = 0;
     mcfg.softserial_2_inverted = 0;
-    mcfg.looptime = 3500;
+    mcfg.looptime = 5000;
     mcfg.emf_avoidance = 0;
     mcfg.rssi_aux_channel = 0;
-    mcfg.rssi_aux_max = 1000;
+//  mcfg.rssi_aux_max = 1000;
     mcfg.rssi_adc_max = 4095;
-    mcfg.rc_channel_count = 8;
+    mcfg.blackbox_rate_num = 1;
+    mcfg.blackbox_rate_denom = 1;
 
+
+//-------20220904
     cfg.pidController = 0;
     cfg.P8[ROLL] = 40;
     cfg.I8[ROLL] = 30;
@@ -285,8 +300,11 @@ static void resetConf(void)
     cfg.P8[PIDVEL] = 120;
     cfg.I8[PIDVEL] = 45;
     cfg.D8[PIDVEL] = 1;
+//-------20220904
+
     cfg.rcRate8 = 90;
     cfg.rcExpo8 = 65;
+    cfg.rollPitchRate = 0;
     cfg.yawRate = 0;
     cfg.dynThrPID = 0;
     cfg.tpa_breakpoint = 1500;
@@ -296,11 +314,12 @@ static void resetConf(void)
     //     cfg.activate[i] = 0;
     cfg.angleTrim[0] = 0;
     cfg.angleTrim[1] = 0;
-    cfg.locked_in = 0;
     cfg.mag_declination = 0;    // For example, -6deg 37min, = -637 Japan, format is [sign]dddmm (degreesminutes) default is zero.
-    cfg.acc_lpf_factor = 4;
+    cfg.acc_lpf_factor = 6;  //4
     cfg.accz_deadband = 40;
     cfg.accxy_deadband = 40;
+    cfg.accx_deadband = 40;
+    cfg.accy_deadband = 150;
     cfg.baro_tab_size = 21;
     cfg.baro_noise_lpf = 0.6f;
     cfg.baro_cf_vel = 0.985f;
@@ -310,7 +329,7 @@ static void resetConf(void)
     cfg.small_angle = 25;
 
     // Radio
-    parseRcChannels( "AETR123456789LMNOP" );    //18 channels max
+    parseRcChannels("AETR1234");
     cfg.deadband = 0;
     cfg.yawdeadband = 0;
     cfg.alt_hold_throttle_neutral = 40;
@@ -335,8 +354,9 @@ static void resetConf(void)
     cfg.yaw_direction = 1;
     cfg.tri_unarmed_servo = 1;
 
+//-----------20220904
     // gimbal
-    cfg.gimbal_flags = GIMBAL_NORMAL;
+    //cfg.gimbal_flags = GIMBAL_NORMAL;
 
     // gps/nav stuff
     cfg.gps_wp_radius = 200;
@@ -347,6 +367,8 @@ static void resetConf(void)
     cfg.nav_speed_max = 300;
     cfg.ap_mode = 40;
     // fw stuff
+    cfg.fw_roll_throw = 0.5f;
+    cfg.fw_pitch_throw = 0.5f;
     cfg.fw_gps_maxcorr = 20;
     cfg.fw_gps_rudder = 15;
     cfg.fw_gps_maxclimb = 15;
@@ -355,9 +377,11 @@ static void resetConf(void)
     cfg.fw_cruise_throttle = 1500;
     cfg.fw_idle_throttle = 1300;
     cfg.fw_scaler_throttle = 8;
-    cfg.fw_roll_comp = 100;
-    cfg.fw_cruise_distance = 500;
-    cfg.fw_rth_alt = 50;
+    cfg.fw_roll_comp = 1;
+    //-----------20220904
+
+
+
     // control stuff
     mcfg.reboot_character = 'R';
 

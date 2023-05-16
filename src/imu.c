@@ -1,6 +1,10 @@
 #include "board.h"
 #include "mw.h"
 
+#define BARO
+#define MAG
+#define sq(x) ((x)*(x)) //add at 20221007
+
 int16_t gyroADC[3], accADC[3], accSmooth[3], magADC[3];
 int32_t accSum[3];
 uint32_t accTimeSum = 0;        // keep track for integration of acc
@@ -12,7 +16,7 @@ uint32_t baroPressureSum = 0;
 int32_t BaroAlt = 0;
 float sonarTransition = 0;
 int32_t baroAlt_offset = 0;
-int32_t sonarAlt = -1;         // in cm , -1 indicate sonar is not in range
+int32_t sonarAlt = -1;         // in cm , -1 indicate sonar is not in range 
 int32_t EstAlt;                // in cm
 int32_t BaroPID = 0;
 int32_t AltHold;
@@ -25,6 +29,31 @@ float magneticDeclination = 0.0f;       // calculated at startup from config
 float accVelScale;
 float throttleAngleScale;
 float fc_acc;
+
+//--------------- FOR QUATERNION start----------------//
+int32_t asum[3];
+float aavg[3];
+int32_t gysum[3];
+float gyavg[3];
+int32_t accgyrocount = 1;
+int16_t quaternionyaw;
+int16_t quaternionpitch;
+int16_t quaternionroll;
+//int32_t getaccgyrosumcheck = 0;
+bool acc_check;
+bool mag_check;
+int8_t use_mag_check = 0;
+int8_t use_acc_check = 0;
+
+//--------------- FOR QUATERNION end------------------//
+
+float redefineangle = 0;            //add at 20221007
+int16_t accADCtmp[3] = { 0, 0, 0 };
+int16_t gyroADCtmp[3] = { 0, 0, 0 };
+int16_t magADCtmp[3] = { 0, 0, 0 };
+int16_t acctmpADC;
+int16_t gyrotmpADC;
+int16_t magtmpADC;
 
 // **************
 // gyro+acc IMU
@@ -41,7 +70,7 @@ void imuInit(void)
     smallAngle = lrintf(acc_1G * cosf(RAD * cfg.small_angle));
     accVelScale = 9.80665f / acc_1G / 10000.0f;
     throttleAngleScale = (1800.0f / M_PI) * (900.0f / cfg.throttle_correction_angle);
-
+    
     fc_acc = 0.5f / (M_PI * cfg.accz_lpf_cutoff); // calculate RC time constant used in the accZ lpf
 
 #ifdef MAG
@@ -65,12 +94,12 @@ void computeIMU(void)
         accADC[Z] = 0;
     }
 
-    if (mcfg.mixerConfiguration == MULTITYPE_TRI) {
+    //if (mcfg.mixerConfiguration == MULTITYPE_TRI) {
         gyroData[YAW] = (gyroYawSmooth * 2 + gyroADC[YAW]) / 3;
         gyroYawSmooth = gyroData[YAW];
-    } else {
-        gyroData[YAW] = gyroADC[YAW];
-    }
+    //} else {
+    //    gyroData[YAW] = gyroADC[YAW];
+    //}
     gyroData[ROLL] = gyroADC[ROLL];
     gyroData[PITCH] = gyroADC[PITCH];
 }
@@ -92,7 +121,7 @@ void computeIMU(void)
 #define INV_GYR_CMPF_FACTOR   (1.0f / ((float)mcfg.gyro_cmpf_factor + 1.0f))
 #define INV_GYR_CMPFM_FACTOR  (1.0f / ((float)mcfg.gyro_cmpfm_factor + 1.0f))
 
-typedef struct fp_vector {
+/*typedef struct fp_vector {
     float X;
     float Y;
     float Z;
@@ -101,7 +130,7 @@ typedef struct fp_vector {
 typedef union {
     float A[3];
     t_fp_vector_def V;
-} t_fp_vector;
+} t_fp_vector;*/
 
 t_fp_vector EstG;
 
@@ -174,7 +203,9 @@ void acc_calc(uint32_t deltaT)
     static float accz_smooth = 0;
     float dT = 0;
     float rpy[3];
+
     t_fp_vector accel_ned;
+    
 
     // deltaT is measured in us ticks
     dT = (float)deltaT * 1e-6f;
@@ -206,7 +237,7 @@ void acc_calc(uint32_t deltaT)
     accSum[X] += applyDeadband(lrintf(accel_ned.V.X), cfg.accxy_deadband);
     accSum[Y] += applyDeadband(lrintf(accel_ned.V.Y), cfg.accxy_deadband);
     accSum[Z] += applyDeadband(lrintf(accz_smooth), cfg.accz_deadband);
-
+    
     accTimeSum += deltaT;
     accSumCount++;
 }
@@ -253,6 +284,8 @@ static void getEstimatedAttitude(void)
     deltaT = currentT - previousT;
     scale = deltaT * gyro.scale;
     previousT = currentT;
+    static float pitchsmooth, rollsmoooth;
+		//static int16_t headsmooth;
 
     // Initialization
     for (axis = 0; axis < 3; axis++) {
@@ -277,19 +310,26 @@ static void getEstimatedAttitude(void)
             EstG.A[axis] = (EstG.A[axis] * (float)mcfg.gyro_cmpf_factor + accSmooth[axis]) * INV_GYR_CMPF_FACTOR;
     }
 
-    f.SMALL_ANGLE = (EstG.A[Z] > smallAngle);
+    //f.SMALL_ANGLE = (EstG.A[Z] > smallAngle);
+    f.SMALL_ANGLE = 1;
 
     // Attitude of the estimated vector
     anglerad[ROLL] = atan2f(EstG.V.Y, EstG.V.Z);
     anglerad[PITCH] = atan2f(-EstG.V.X, sqrtf(EstG.V.Y * EstG.V.Y + EstG.V.Z * EstG.V.Z));
+		anglerad[ROLL] = (rollsmoooth*4+anglerad[ROLL])/5;
+		anglerad[PITCH] = (pitchsmooth*9+anglerad[PITCH])/10;
     angle[ROLL] = lrintf(anglerad[ROLL] * (1800.0f / M_PI));
     angle[PITCH] = lrintf(anglerad[PITCH] * (1800.0f / M_PI));
+		rollsmoooth = anglerad[ROLL];
+		pitchsmooth = anglerad[PITCH];
 
     if (sensors(SENSOR_MAG)) {
         rotateV(&EstM.V, deltaGyroAngle);
         for (axis = 0; axis < 3; axis++)
             EstM.A[axis] = (EstM.A[axis] * (float)mcfg.gyro_cmpfm_factor + magADC[axis]) * INV_GYR_CMPFM_FACTOR;
         heading = calculateHeading(&EstM);
+			  //heading = (headsmooth*4 + heading)/5;
+			  //headsmooth = heading;
     } else {
         rotateV(&EstN.V, deltaGyroAngle);
         normalizeV(&EstN.V, &EstN.V);
@@ -312,6 +352,7 @@ static void getEstimatedAttitude(void)
         }
 
     }
+    
 }
 
 #ifdef BARO
@@ -333,6 +374,7 @@ int getEstimatedAltitude(void)
     static float accZ_old = 0.0f;
     static float vel = 0.0f;
     static float accAlt = 0.0f;
+    
     static int32_t lastBaroAlt;
     static int32_t baroGroundAltitude = 0;
     static int32_t baroGroundPressure = 0;
@@ -347,7 +389,6 @@ int getEstimatedAltitude(void)
         baroGroundPressure -= baroGroundPressure / 8;
         baroGroundPressure += baroPressureSum / (cfg.baro_tab_size - 1);
         baroGroundAltitude = (1.0f - powf((baroGroundPressure / 8) / 101325.0f, 0.190295f)) * 4433000.0f;
-
         vel = 0;
         accAlt = 0;
         calibratingB--;
@@ -393,7 +434,7 @@ int getEstimatedAltitude(void)
     else
         EstAlt = accAlt;
 
-    vel += vel_acc;
+    vel += vel_acc; 
 
 #if 0
     debug[0] = accSum[2] / accSumCount; // acceleration
@@ -414,6 +455,7 @@ int getEstimatedAltitude(void)
     vel = vel * cfg.baro_cf_vel + baroVel * (1 - cfg.baro_cf_vel);
     vel_tmp = lrintf(vel);
 
+
     // set vario
     vario = applyDeadband(vel_tmp, 5);
 
@@ -426,7 +468,7 @@ int getEstimatedAltitude(void)
         } else {
             setVel = setVelocity;
         }
-
+        
         // Velocity PID-Controller
         // P
         error = setVel - vel_tmp;
@@ -445,7 +487,391 @@ int getEstimatedAltitude(void)
     }
 
     accZ_old = accZ_tmp;
-
     return 1;
 }
 #endif /* BARO */
+
+//----------------------------------------------------------------------20220913 add quaternion-----------------------------------------------------------------------//
+// from cleanflight imu.c and CSDN (https://blog.csdn.net/lqj11/article/details/107423334)
+
+void getaccgyro_sum_and_avg (void){         //  200hz update rate
+
+    if(accgyrocount /5 == 1){
+        asum[X] = accSmooth[X];
+        asum[Y] = accSmooth[Y];
+        asum[Z] = accSmooth[Z];
+        gysum[X] = applyDeadband(gyroADC[X],7);
+        gysum[Y] = applyDeadband(gyroADC[Y],1);
+        gysum[Z] = applyDeadband(gyroADC[Z],1);
+        accgyrocount = 1;
+
+    }else{
+        asum[X] += accSmooth[X];
+        asum[Y] += accSmooth[Y];
+        asum[Z] += accSmooth[Z];
+        gysum[X] += applyDeadband(gyroADC[X],7);
+        gysum[Y] += applyDeadband(gyroADC[Y],1);
+        gysum[Z] += applyDeadband(gyroADC[Z],1);
+
+    }
+
+    aavg[X] = (float)(asum[X]/accgyrocount)/4096.0f * 9.8f;        //convert to (m/s^2)
+    aavg[Y] = (float)(asum[Y]/accgyrocount)/4096.0f * 9.8f;
+    aavg[Z] = (float)(asum[Z]/accgyrocount)/4096.0f * 9.8f;
+
+    gyavg[X] = (float)(gysum[X]/accgyrocount)*(4.0f / 16.4f);  //remember convert to (rad/s) when AHRSupdate's input (16.4 dps/lsb, baseflight在獲取繳速度adc時除以4，這裡要*4回來，看baseflight sensor.c)
+    gyavg[Y] = (float)(gysum[Y]/accgyrocount)*(4.0f / 16.4f);
+    gyavg[Z] = (float)(gysum[Z]/accgyrocount)*(4.0f / 16.4f);
+    
+    accgyrocount ++;
+    //getaccgyrosumcheck ++;
+}
+
+//------------------------------------------define math stuff start --------------------------------------------------//
+
+#define M_PIf       3.14159265358979323846f
+#define sinPolyCoef3 -1.666568107e-1f
+#define sinPolyCoef5  8.312366210e-3f
+#define sinPolyCoef7 -1.849218155e-4f
+#define sinPolyCoef9  0
+
+float sin_approx(float x)
+{
+    int32_t xint = x;
+    if (xint < -32 || xint > 32) return 0.0f;                               // Stop here on error input (5 * 360 Deg)
+    while (x >  M_PIf) x -= (2.0f * M_PIf);                                 // always wrap input angle to -PI..PI
+    while (x < -M_PIf) x += (2.0f * M_PIf);
+    if (x >  (0.5f * M_PIf)) x =  (0.5f * M_PIf) - (x - (0.5f * M_PIf));   // We just pick -90..+90 Degree
+    else if (x < -(0.5f * M_PIf)) x = -(0.5f * M_PIf) - ((0.5f * M_PIf) + x);
+    float x2 = x * x;
+    return x + x * x2 * (sinPolyCoef3 + x2 * (sinPolyCoef5 + x2 * (sinPolyCoef7 + x2 * sinPolyCoef9)));
+}
+
+float cos_approx(float x)
+{
+    return sin_approx(x + (0.5f * M_PIf));
+}
+
+// Initial implementation by Crashpilot1000 (https://github.com/Crashpilot1000/HarakiriWebstore1/blob/396715f73c6fcf859e0db0f34e12fe44bace6483/src/mw.c#L1292)
+// Polynomial coefficients by Andor (http://www.dsprelated.com/showthread/comp.dsp/21872-1.php) optimized by Ledvinap to save one multiplication
+// Max absolute error 0,000027 degree
+// atan2_approx maximum absolute error = 7.152557e-07 rads (4.098114e-05 degree)
+float atan2_approx(float y, float x)
+{
+    #define atanPolyCoef1  3.14551665884836e-07f
+    #define atanPolyCoef2  0.99997356613987f
+    #define atanPolyCoef3  0.14744007058297684f
+    #define atanPolyCoef4  0.3099814292351353f
+    #define atanPolyCoef5  0.05030176425872175f
+    #define atanPolyCoef6  0.1471039133652469f
+    #define atanPolyCoef7  0.6444640676891548f
+
+    float res, absX, absY;
+    absX = fabsf(x);
+    absY = fabsf(y);
+    res  = max(absX, absY);
+    if (res) res = min(absX, absY) / res;
+    else res = 0.0f;
+    res = -((((atanPolyCoef5 * res - atanPolyCoef4) * res - atanPolyCoef3) * res - atanPolyCoef2) * res - atanPolyCoef1) / ((atanPolyCoef7 * res + atanPolyCoef6) * res + 1.0f);
+    if (absY > absX) res = (M_PIf / 2.0f) - res;
+    if (x < 0) res = M_PIf - res;
+    if (y < 0) res = -res;
+    return res;
+}
+
+// http://http.developer.nvidia.com/Cg/acos.html
+// Handbook of Mathematical Functions
+// M. Abramowitz and I.A. Stegun, Ed.
+// acos_approx maximum absolute error = 6.760856e-05 rads (3.873685e-03 degree)
+float acos_approx(float x)
+{
+    float xa = fabsf(x);
+    float result = sqrtf(1.0f - xa) * (1.5707288f + xa * (-0.2121144f + xa * (0.0742610f + (-0.0187293f * xa))));
+    if (x < 0.0f)
+        return M_PIf - result;
+    else
+        return result;
+}
+
+//invsqrt from CSDN
+static float invSqrt(float x) 		//快速计算 1/Sqrt(x)
+{
+
+	float halfx = 0.5f * x;
+	float y = x;
+	long i = *(long*)&y;
+	i = 0x5f3759df - (i>>1);
+	y = *(float*)&i;
+	y = y * (1.5f - (halfx * y * y));
+	return y;
+}
+
+//static float invSqrt(float x)
+//{
+//    return 1.0f / sqrtf(x);
+//}
+
+//版权声明：本文为CSDN博主「大写的小写字母」的原创文章，遵循CC 4.0 BY-SA版权协议，转载请附上原文出处链接及本声明。
+//原文链接：https://blog.csdn.net/lqj11/article/details/107423334
+
+//----------------------------------------------define math stuff end------------------------------------------------------------//
+
+#define SPIN_RATE_LIMIT 20
+#define ATTITUDE_RESET_QUIET_TIME 250000   // 250ms - gyro quiet period after disarm before attitude reset
+#define ATTITUDE_RESET_GYRO_LIMIT 15       // 15 deg/sec - gyro limit for quiet period
+#define ATTITUDE_RESET_KP_GAIN    25.0     // dcmKpGain value to use during attitude reset
+#define ATTITUDE_RESET_ACTIVE_TIME 500000  // 500ms - Time to wait for attitude to converge at high gain
+#define GPS_COG_MIN_GROUNDSPEED 500        // 500cm/s minimum groundspeed for a gps heading to be considered valid
+
+#define sq(x) ((x)*(x))
+
+static imuRuntimeConfig_t imuRuntimeConfig;
+mag_t mag_quat;                   // mag access functions
+
+float accAverage[XYZ_AXIS_COUNT];
+float rMat[3][3];
+
+// quaternion of sensor frame relative to earth frame
+quaternion q = QUATERNION_INITIALIZE;
+quaternionProducts qP = QUATERNION_PRODUCTS_INITIALIZE;
+// headfree quaternions
+quaternion headfree = QUATERNION_INITIALIZE;
+quaternion offset = QUATERNION_INITIALIZE;
+
+attitudeEulerAngles_t attitude = EULER_INITIALIZE;
+
+void imuComputeRotationMatrix(void){    //body to earth
+    imuQuaternionComputeProducts(&q, &qP);
+
+    rMat[0][0] = 1.0f - 2.0f * qP.yy - 2.0f * qP.zz;
+    rMat[0][1] = 2.0f * (qP.xy + -qP.wz);
+    rMat[0][2] = 2.0f * (qP.xz - -qP.wy);
+
+    rMat[1][0] = 2.0f * (qP.xy - -qP.wz);
+    rMat[1][1] = 1.0f - 2.0f * qP.xx - 2.0f * qP.zz;
+    rMat[1][2] = 2.0f * (qP.yz + -qP.wx);
+
+    rMat[2][0] = 2.0f * (qP.xz + -qP.wy);
+    rMat[2][1] = 2.0f * (qP.yz - -qP.wx);
+    rMat[2][2] = 1.0f - 2.0f * qP.xx - 2.0f * qP.yy;
+}
+
+static void imuMahonyAHRSupdate(float dt, float gx, float gy, float gz,
+                                bool useAcc, float ax, float ay, float az,
+                                bool useMag, float mx, float my, float mz,
+                                bool useCOG, float courseOverGround)
+{
+    static float integralFBx = 0.0f,  integralFBy = 0.0f, integralFBz = 0.0f;    // integral error terms scaled by Ki
+    float dcmKpGain = 2.5f;
+    float dcmKiGain  = 0.3f;
+    float dcm_ki = 0.3; //等於0則不使用ki
+    acc_check = useAcc;
+    mag_check = useMag;
+
+    // Calculate general spin rate (rad/s)
+    const float spin_rate = sqrtf(sq(gx) + sq(gy) + sq(gz));
+
+    // Use raw heading error (from GPS or whatever else)
+    float ex = 0, ey = 0, ez = 0;
+    if (useCOG) {
+        while (courseOverGround >  M_PIf) {
+            courseOverGround -= (2.0f * M_PIf);
+        }
+
+        while (courseOverGround < -M_PIf) {
+            courseOverGround += (2.0f * M_PIf);
+        }
+
+        const float ez_ef = (- sin_approx(courseOverGround) * rMat[0][0] - cos_approx(courseOverGround) * rMat[1][0]);
+
+        ex = rMat[2][0] * ez_ef;
+        ey = rMat[2][1] * ez_ef;
+        ez = rMat[2][2] * ez_ef;
+    }
+
+#ifdef MAG
+    // Use measured magnetic field vector
+    float recipMagNorm = sq(mx) + sq(my) + sq(mz);
+    if (useMag && recipMagNorm > 0.01f) {
+        // Normalise magnetometer measurement
+        recipMagNorm = invSqrt(recipMagNorm);
+        mx *= recipMagNorm;
+        my *= recipMagNorm;
+        mz *= recipMagNorm;
+
+        // For magnetometer correction we make an assumption that magnetic field is perpendicular to gravity (ignore Z-component in EF).
+        // This way magnetic field will only affect heading and wont mess roll/pitch angles
+
+        // (hx; hy; 0) - measured mag field vector in EF (assuming Z-component is zero)
+        // (bx; 0; 0) - reference mag field vector heading due North in EF (assuming Z-component is zero)
+        const float hx = rMat[0][0] * mx + rMat[0][1] * my + rMat[0][2] * mz;
+        const float hy = rMat[1][0] * mx + rMat[1][1] * my + rMat[1][2] * mz;
+        const float bx = sqrtf(hx * hx + hy * hy);
+
+        // magnetometer error is cross product between estimated magnetic north and measured magnetic north (calculated in EF)
+        const float ez_ef = -(hy * bx);
+
+        // Rotate mag error vector back to BF and accumulate
+        ex += rMat[2][0] * ez_ef;
+        ey += rMat[2][1] * ez_ef;
+        ez += rMat[2][2] * ez_ef;
+
+    }
+#endif
+
+    // Use measured acceleration vector
+    float recipAccNorm = sq(ax) + sq(ay) + sq(az);
+    if (useAcc && recipAccNorm > 0.01f) {
+        // Normalise accelerometer measurement
+        recipAccNorm = invSqrt(recipAccNorm);
+        ax *= recipAccNorm;
+        ay *= recipAccNorm;
+        az *= recipAccNorm;
+
+        // Error is sum of cross product between estimated direction and measured direction of gravity
+        ex += (ay * rMat[2][2] - az * rMat[2][1]);
+        ey += (az * rMat[2][0] - ax * rMat[2][2]);
+        ez += (ax * rMat[2][1] - ay * rMat[2][0]);
+    }
+
+    // Compute and apply integral feedback if enabled
+    if (dcm_ki > 0.0f) {
+        // Stop integrating if spinning beyond the certain limit
+        if (spin_rate < DEGREES_TO_RADIANS(SPIN_RATE_LIMIT)) {
+            const float dcmKiGain = imuRuntimeConfig.dcm_ki;
+            integralFBx += dcmKiGain * ex * dt;    // integral error scaled by Ki
+            integralFBy += dcmKiGain * ey * dt;
+            integralFBz += dcmKiGain * ez * dt;
+        }
+    } else {
+        integralFBx = 0.0f;    // prevent integral windup
+        integralFBy = 0.0f;
+        integralFBz = 0.0f;
+    }
+
+    // Apply proportional and integral feedback
+    gx += dcmKpGain * ex + integralFBx;
+    gy += dcmKpGain * ey + integralFBy;
+    gz += dcmKpGain * ez + integralFBz;
+
+    // Integrate rate of change of quaternion
+    gx *= (0.5f * dt);
+    gy *= (0.5f * dt);
+    gz *= (0.5f * dt);
+
+    quaternion buffer;
+    buffer.w = q.w;
+    buffer.x = q.x;
+    buffer.y = q.y;
+    buffer.z = q.z;
+
+    q.w += (-buffer.x * gx - buffer.y * gy - buffer.z * gz);
+    q.x += (+buffer.w * gx + buffer.y * gz - buffer.z * gy);
+    q.y += (+buffer.w * gy - buffer.x * gz + buffer.z * gx);
+    q.z += (+buffer.w * gz + buffer.x * gy - buffer.y * gx);
+
+    // Normalise quaternion
+    float recipNorm = invSqrt(sq(q.w) + sq(q.x) + sq(q.y) + sq(q.z));
+    q.w *= recipNorm;
+    q.x *= recipNorm;
+    q.y *= recipNorm;
+    q.z *= recipNorm;
+
+    // Pre-compute rotation matrix from quaternion
+    imuComputeRotationMatrix();
+}
+
+void imuUpdateEulerAngles(void) //output euler angle sequence is 'ZYX'
+{
+       attitude.values.roll = lrintf(atan2_approx(rMat[2][1], rMat[2][2]) * (1800.0f / M_PIf));
+       attitude.values.pitch = lrintf(((0.5f * M_PIf) - acos_approx(-rMat[2][0])) * (1800.0f / M_PIf));
+       attitude.values.yaw = lrintf((-atan2_approx(rMat[1][0], rMat[0][0]) * (1800.0f / M_PIf)));
+
+    if (attitude.values.yaw < 0)
+        attitude.values.yaw += 3600;
+}
+
+static void imuCalculateEstimatedAttitude(timeUs_t currentTimeUs)
+{
+    //timeUs_t currentTimeUs = micros();
+    static timeUs_t previousIMUUpdateTime;
+    bool useAcc = true;
+    bool useMag = true;
+    bool useCOG = false; // Whether or not correct yaw via imuMahonyAHRSupdate from our ground course
+    float courseOverGround = 0; // To be used when useCOG is true.  Stored in Radians
+
+    const timeDelta_t deltaT = currentTimeUs - previousIMUUpdateTime;
+    previousIMUUpdateTime = currentTimeUs;
+
+#ifdef USE_MAG
+    if (sensors(SENSOR_MAG) && compassIsHealthy()) {
+        useMag = true;
+    }
+#endif
+#if defined(USE_GPS)
+    if (!useMag && sensors(SENSOR_GPS) && STATE(GPS_FIX) && gpsSol.numSat >= 5 && gpsSol.groundSpeed >= GPS_COG_MIN_GROUNDSPEED) {
+        // Use GPS course over ground to correct attitude.values.yaw
+        if (STATE(FIXED_WING)) {
+            courseOverGround = DECIDEGREES_TO_RADIANS(gpsSol.groundCourse);
+            useCOG = true;
+        } else {
+            // If GPS rescue mode is active and we can use it, go for it.  When we're close to home we will
+            // probably stop re calculating GPS heading data.  Other future modes can also use this extern
+
+            if (canUseGPSHeading) {
+                courseOverGround = DECIDEGREES_TO_RADIANS(gpsSol.groundCourse);
+
+                useCOG = true;
+            }
+        }
+
+        if (useCOG && shouldInitializeGPSHeading()) {
+            // Reset our reference and reinitialize quaternion.  This will likely ideally happen more than once per flight, but for now,
+            // shouldInitializeGPSHeading() returns true only once.
+            imuComputeQuaternionFromRPY(&qP, attitude.values.roll, attitude.values.pitch, gpsSol.groundCourse);
+
+            useCOG = false; // Don't use the COG when we first reinitialize.  Next time around though, yes.
+        }
+    }
+#endif
+
+    getaccgyro_sum_and_avg();
+
+    imuMahonyAHRSupdate(deltaT * 1e-6f,
+                        DEGREES_TO_RADIANS(gyavg[X]), DEGREES_TO_RADIANS(gyavg[Y]), DEGREES_TO_RADIANS(gyavg[Z]),
+                        useAcc, aavg[X], aavg[Y], aavg[Z],
+                        useMag, magADC[X], magADC[Y], magADC[Z],
+                        useCOG, courseOverGround);
+    imuUpdateEulerAngles();
+}
+
+
+void imuUpdateAttitude(timeUs_t currentTimeUs)
+{
+    if (sensors(SENSOR_ACC)) {
+
+        imuCalculateEstimatedAttitude(currentTimeUs);
+
+    }          
+}
+
+void imuQuaternionComputeProducts(quaternion *quat, quaternionProducts *quatProd)
+{
+    quatProd->ww = quat->w * quat->w;
+    quatProd->wx = quat->w * quat->x;
+    quatProd->wy = quat->w * quat->y;
+    quatProd->wz = quat->w * quat->z;
+    quatProd->xx = quat->x * quat->x;
+    quatProd->xy = quat->x * quat->y;
+    quatProd->xz = quat->x * quat->z;
+    quatProd->yy = quat->y * quat->y;
+    quatProd->yz = quat->y * quat->z;
+    quatProd->zz = quat->z * quat->z;
+}
+
+void use_quaternion_angle(void){
+    quaternionpitch = attitude.values.pitch;
+    quaternionroll = attitude.values.roll;
+    quaternionyaw = attitude.values.yaw;
+}
+

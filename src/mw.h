@@ -17,6 +17,10 @@
 
 #define RC_CHANS    (18)
 
+//#define GPS
+#define WIFI // 20221022 for wifi
+
+//-------------20220904
 // Serial GPS only variables
 // navigation mode
 typedef enum NavigationMode {
@@ -24,9 +28,11 @@ typedef enum NavigationMode {
     NAV_MODE_POSHOLD,
     NAV_MODE_WP
 } NavigationMode;
+//------20220904
 
 // Syncronized with GUI. Only exception is mixer > 11, which is always returned as 11 during serialization.
-typedef enum MultiType {
+typedef enum MultiType
+{
     MULTITYPE_TRI = 1,
     MULTITYPE_QUADP = 2,
     MULTITYPE_QUADX = 3,
@@ -45,7 +51,7 @@ typedef enum MultiType {
     MULTITYPE_HELI_90_DEG = 16,
     MULTITYPE_VTAIL4 = 17,
     MULTITYPE_HEX6H = 18,
-    MULTITYPE_PPM_TO_SERVO = 19,    // PPM -> servo relay
+    MULTITYPE_PPM_TO_SERVO = 19,    // PPM -> servo relay 
     MULTITYPE_DUALCOPTER = 20,
     MULTITYPE_SINGLECOPTER = 21,
     MULTITYPE_ATAIL4 = 22,
@@ -53,12 +59,6 @@ typedef enum MultiType {
     MULTITYPE_CUSTOM_PLANE = 24,
     MULTITYPE_LAST = 25
 } MultiType;
-
-typedef enum GimbalFlags {
-    GIMBAL_NORMAL = 1 << 0,
-    GIMBAL_MIXTILT = 1 << 1,
-    GIMBAL_FORWARDAUX = 1 << 2,
-} GimbalFlags;
 
 typedef enum FlapsType {
     FLAPS_DISABLED = 0,
@@ -121,7 +121,6 @@ enum {
     BOXSERVO1,
     BOXSERVO2,
     BOXSERVO3,
-    BOXGCRUISE,
     CHECKBOXITEMS
 };
 
@@ -200,6 +199,7 @@ typedef struct mixerRules_t {
     const servoMixer_t *rule;
 } mixerRules_t;
 
+#define MAX_MOTORS      12
 #define MAX_SERVO_RULES (2 * MAX_SERVOS)
 #define MAX_SERVOS      8
 #define MAX_SERVO_SPEED UINT8_MAX
@@ -226,19 +226,20 @@ typedef struct config_t {
     uint8_t thrMid8;
     uint8_t thrExpo8;
 
-    uint8_t rollPitchRate[2];
+    uint8_t rollPitchRate;
     uint8_t yawRate;
 
     uint8_t dynThrPID;
     uint16_t tpa_breakpoint;                // Breakpoint where TPA is activated
     int16_t mag_declination;                // Get your magnetic decliniation from here : http://magnetic-declination.com/
     int16_t angleTrim[2];                   // accelerometer trim
-    uint8_t locked_in;
 
     // sensor-related stuff
     uint8_t acc_lpf_factor;                 // Set the Low Pass Filter factor for ACC. Increasing this value would reduce ACC noise (visible in GUI), but would increase ACC lag time. Zero = no filter
     uint8_t accz_deadband;                  // set the acc deadband for z-Axis, this ignores small accelerations
     uint8_t accxy_deadband;                 // set the acc deadband for xy-Axis
+    uint8_t accx_deadband;
+    uint8_t accy_deadband;
     uint8_t baro_tab_size;                  // size of baro filter array
     float baro_noise_lpf;                   // additional LPF to reduce baro noise
     float baro_cf_vel;                      // apply Complimentary Filter to keep the calculated velocity based on baro velocity (i.e. near real velocity)
@@ -247,7 +248,7 @@ typedef struct config_t {
     uint8_t acc_unarmedcal;                 // turn automatic acc compensation on/off
     uint8_t small_angle;                    // what is considered a safe angle for arming
 
-    uint32_t activate[CHECKBOXITEMS];       // activate switches
+    uint16_t activate[CHECKBOXITEMS];       // activate switches
 
     // Radio/ESC-related configuration
     uint8_t deadband;                       // introduce a deadband around the stick center for pitch and roll axis. Must be greater than zero.
@@ -273,7 +274,8 @@ typedef struct config_t {
     // gimbal-related configuration
     uint8_t gimbal_flags;                   // in servotilt mode, various things that affect stuff
 
-    // gps-related stuff
+//------------------------20220904----------//
+ // gps-related stuff
     uint16_t gps_wp_radius;                 // if we are within this distance to a waypoint then we consider it reached (distance is in cm)
     uint8_t gps_lpf;                        // Low pass filter cut frequency for derivative calculation (default 20Hz)
     uint8_t nav_slew_rate;                  // Adds a rate control to nav output, will smoothen out nav angle spikes
@@ -297,7 +299,14 @@ typedef struct config_t {
     int16_t fw_cruise_distance;                // Distance to viritual WP.
     uint8_t fw_rth_alt;                        // Min Altitude to keep during RTH. (Max 200m)
 
+//------------------------20220907----------
+    float fw_roll_throw;
+    float fw_pitch_throw;
+//------------------------20220907----------
+
 } config_t;
+//------------------------20220904----------
+
 
 // System-wide
 typedef struct master_t {
@@ -356,7 +365,7 @@ typedef struct master_t {
     uint8_t power_adc_channel;              // which channel is used for current sensor. Right now, only 3 places are supported: RC_CH2 (unused when in CPPM mode, = 1), RC_CH8 (last channel in PWM mode, = 9), ADC_EXTERNAL_PAD (Rev5 only, = 5), 0 to disable
 
     // Radio/ESC-related configuration
-    uint8_t rcmap[RC_CHANS];                // mapping of radio channels to internal RPYTA+ order
+    uint8_t rcmap[8];                       // mapping of radio channels to internal RPYTA+ order
     uint8_t serialrx_type;                  // type of UART-based receiver (0 = spek 10, 1 = spek 11, 2 = sbus). Must be enabled by FEATURE_SERIALRX first.
     uint8_t spektrum_sat_bind;              // Spektrum satellite bind. 0 - 10 (0 = disabled)
     uint8_t spektrum_sat_on_flexport;       // Spektrum satellite on USART3 (flexport, available with rev5sp hardware)
@@ -367,18 +376,18 @@ typedef struct master_t {
     uint8_t disarm_kill_switch;             // AUX disarm independently of throttle value
     int8_t fw_althold_dir;                  // +1 or -1 for pitch/althold gain. later check if need more than just sign
     uint8_t rssi_aux_channel;               // Read rssi from channel. 1+ = AUX1+, 0 to disable.
-    uint16_t rssi_aux_max;                  // max value for injected RSSI on AUX channel, range (0...1000), default is 1000
     uint8_t rssi_adc_channel;               // Read analog-rssi from RC-filter (RSSI-PWM to RSSI-Analog), RC_CH2 (unused when in CPPM mode, = 1), RC_CH8 (last channel in PWM mode, = 9), ADC_EXTERNAL_PAD (Rev5 only, = 5), 0 to disable (disabled if rssi_aux_channel > 0 or rssi_adc_channel == power_adc_channel)
     uint16_t rssi_adc_max;                  // max input voltage defined by RC-filter (is RSSI never 100% reduce the value) (1...4095)
     uint16_t rssi_adc_offset;               // input offset defined by RC-filter (0...4095)
-    uint8_t rc_channel_count;               // total number of incoming RC channels that should be processed, range (8...18), default is 8
+    uint8_t rc_channel_count;               // total number of incoming RC channels that should be processed, range (8...18), default is 8    //20220904
 
+//----------20220904
     // gps-related stuff
-    uint8_t gps_type;                       // See GPSHardware enum.
+    uint8_t gps_type ;                       // See GPSHardware enum.
     int8_t gps_baudrate;                    // See GPSBaudRates enum.
     int8_t gps_ubx_sbas;                    // UBX SBAS setting.  -1 = disabled, 0 = AUTO, 1 = EGNOS, 2 = WAAS, 3 = MSAS, 4 = GAGAN (default = 0 = AUTO)
     uint8_t gps_autobaud;                   // GPS autobaud setting. When enabled GPS baud rate will be lowered if there are timeout. 0 = disabled, 1 = enabled
-
+//----------20220904
 
     uint32_t serial_baudrate;               // primary serial (MSP) port baudrate
 
@@ -386,12 +395,16 @@ typedef struct master_t {
     uint8_t softserial_1_inverted;          // use inverted softserial input and output signals on port 1
     uint8_t softserial_2_inverted;          // use inverted softserial input and output signals on port 2
 
-    uint8_t telemetry_provider;             // See TelemetryProvider enum.
-    uint8_t telemetry_port;                 // See TelemetryPort enum.
-    uint8_t telemetry_switch;               // Use aux channel to change serial output & baudrate( MSP / Telemetry ). It disables automatic switching to Telemetry when armed.
+//    uint8_t telemetry_provider;             // See TelemetryProvider enum.
+//    uint8_t telemetry_port;                 // See TelemetryPort enum.
+//    uint8_t telemetry_switch;               // Use aux channel to change serial output & baudrate( MSP / Telemetry ). It disables automatic switching to Telemetry when armed.
     config_t profile[3];                    // 3 separate profiles
     uint8_t current_profile;                // currently loaded profile
     uint8_t reboot_character;               // which byte is used to reboot. Default 'R', could be changed carefully to something else.
+
+    // blackbox settings
+    uint8_t blackbox_rate_num;              // Together with the denom, chooses fraction of loop iterations to record
+    uint8_t blackbox_rate_denom;            //
 
     uint8_t magic_ef;                       // magic number, should be 0xEF
     uint8_t chk;                            // XOR checksum
@@ -404,8 +417,9 @@ typedef struct core_t {
     serialPort_t *gpsport;
     serialPort_t *telemport;
     serialPort_t *rcvrport;
+    serialPort_t *wifiport;
+    uint8_t mpu6050_scale;                  // es/non-es variance between MPU6050 sensors, half my boards are mpu6000ES, need this to be dynamic. automatically set by mpu6050 driver.
     uint8_t numRCChannels;                  // number of rc channels as reported by current input driver
-    uint8_t numAuxChannels;
     bool useServo;                          // feature SERVO_TILT or wing/airplane mixers will enable this
     uint8_t numServos;                      // how many total hardware servos we have. used by mixer
 } core_t;
@@ -431,13 +445,14 @@ typedef struct flags_t {
     uint8_t MOTORS_STOPPED;
     uint8_t FW_FAILSAFE_RTH_ENABLE;
     uint8_t CLIMBOUT_FW;
-    uint8_t CRUISE_MODE;
+    uint8_t CRUISE_MODE;        //20220904
 } flags_t;
 
 extern int16_t gyroZero[3];
 extern int16_t gyroData[3];
 extern int16_t angle[2];
 extern int16_t axisPID[3];
+//extern int32_t axisPID_P[3], axisPID_I[3], axisPID_D[3];
 extern int16_t rcCommand[4];
 extern uint8_t rcOptions[CHECKBOXITEMS];
 extern int16_t failsafeCnt;
@@ -478,11 +493,16 @@ extern int16_t telemTemperature1;      // gyro sensor temperature
 extern int32_t amperage;               // amperage read by current sensor in 0.01A steps
 extern int32_t mAhdrawn;              // milli ampere hours drawn from battery since start
 
+extern uint16_t vbatLatest;
+extern int16_t store_alt;
+extern int16_t store_pwm[5];
+
 #define PITCH_LOOKUP_LENGTH 7
 #define THROTTLE_LOOKUP_LENGTH 12
 extern int16_t lookupPitchRollRC[PITCH_LOOKUP_LENGTH];   // lookup table for expo & RC rate PITCH+ROLL
 extern int16_t lookupThrottleRC[THROTTLE_LOOKUP_LENGTH];   // lookup table for expo & mid THROTTLE
 
+//-----------20220904
 // GPS stuff
 extern int32_t  GPS_coord[2];
 extern int32_t  GPS_home[3];
@@ -506,6 +526,16 @@ extern uint32_t GPS_update_rate[2];                          // GPS coordinates 
 extern uint32_t GPS_svinfo_rate[2];                          // GPS svinfo updating rate
 extern uint32_t GPS_HorizontalAcc;                           // Horizontal accuracy estimate (mm)
 extern uint32_t GPS_VerticalAcc;                             // Vertical accuracy estimate (mm)
+
+extern uint8_t gpsstate;
+extern uint8_t gpstypecheck;
+extern uint8_t gpsInitUbloxcheck;
+extern uint8_t ubx_init_statecheck;
+
+//-----------20220904
+extern float GPS_scaleLonDown;  //20221007 for circling
+extern int16_t gps_actual_speed[2]; 
+
 extern core_t core;
 extern master_t mcfg;
 extern config_t cfg;
@@ -513,6 +543,8 @@ extern flags_t f;
 extern sensor_t acc;
 extern sensor_t gyro;
 extern baro_t baro;
+
+extern int count;
 
 // main
 void setPIDController(int type);
@@ -535,8 +567,8 @@ int Baro_update(void);
 void Gyro_getADC(void);
 void Mag_init(void);
 int Mag_getADC(void);
-void Sonar_init(void);
-void Sonar_update(void);
+//void Sonar_init(void);
+//void Sonar_update(void);
 uint16_t RSSI_getValue(void);
 
 // Output
@@ -547,8 +579,8 @@ void servoMixerLoadMix(int index);
 void writeServos(void);
 void writeMotors(void);
 void writeAllMotors(int16_t mc);
-void mixTable(void);
-void loadCustomServoMixer(void);
+//void mixTable(void);
+//void loadCustomServoMixer(void);
 
 // Serial
 void serialInit(uint32_t baudrate);
@@ -612,4 +644,106 @@ void GPS_set_next_wp(int32_t *lat, int32_t *lon);
 int32_t wrap_18000(int32_t error);
 void fw_nav(void);
 void fw_FlyTo(void);
+
+// add at 20221022 for wifi
+void wifiInit(void);
+void getwifidata(void);
+void update_wifidata(void);
+void wifi_ledblink(void);
+extern float rigidbody_x;
+extern float rigidbody_y;
+extern float rigidbody_z;
+extern float original_x;
+extern float original_y;
+extern float original_z;
+extern int16_t tmp_px;
+extern int16_t tmp_py;
+extern int16_t tmp_pz;
+extern int16_t OX;
+extern int16_t OY;
+extern int16_t wifiloopcount;
+
+//for quaternion
+extern int16_t quaternionyaw;
+extern int16_t quaternionpitch;
+extern int16_t quaternionroll;
+extern quaternion q;
+extern quaternion q_des;
+extern quaternion quaternion_ref;
+static float invSqrt(float x);
+float sin_approx(float x);
+float cos_approx(float x);
+float atan2_approx(float y, float x);
+float acos_approx(float x);
+void imuComputeRotationMatrix(void);
+static void imuMahonyAHRSupdate(float dt, float gx, float gy, float gz,
+                                bool useAcc, float ax, float ay, float az,
+                                bool useMag, float mx, float my, float mz,
+                                bool useCOG, float courseOverGround);
+void imuUpdateEulerAngles(void);
+static void imuCalculateEstimatedAttitude(timeUs_t currentTimeUs);
+void imuUpdateAttitude(timeUs_t currentTimeUs);
+void imuQuaternionComputeProducts(quaternion *quat, quaternionProducts *quatProd);
+void imuQuaternionMultiplication(quaternion *q1, quaternion *q2, quaternion *result);
+void getaccgyro_sum_and_avg (void);
+void use_quaternion_angle(void);
+void imuComputeQuaternionFromRPY(int16_t initialRoll, int16_t initialPitch, int16_t initialYaw, quaternion *q);
+void quaternion_ref_to_RotationMatrix(quaternion *q);
+extern quaternion desired_quaternion;
+extern quaternion quaternion_error;
+extern float rMat[3][3];
+
+//for controller
+extern int16_t OZ;
+void bounding(int16_t *input, int upper_bound, int lower_bound);
+float x_PID_controller(float cmd);
+float y_PID_controller(float cmd);
+float z_PID_controller(float cmd);
+int16_t z_baro_PID_controller(int16_t cmd);
+void position_controller(float x_error, float y_error, float z_error);
+void calculate_quaternion_error(void);
+int16_t roll_quaternion_controller(void);
+int16_t pitch_quaternion_controller(void);
+int16_t yaw_quaternion_controller(void);
+int16_t thrust_controller(float body_vx_ref, float h_ref);
+void cal_body_velocity(uint32_t cur_time);
+extern int16_t thrust_cmd;
+extern int16_t roll_cmd;
+extern int16_t pitch_cmd;
+extern int16_t yaw_cmd;
+extern int16_t body_vx_datalog;
+extern int16_t cx_datalog;
+extern int16_t cy_datalog;
+extern int16_t cz_datalog;
+extern int16_t auxState_log;
+extern int16_t ref_roll_angle;
+extern int16_t ref_pitch_angle;
+extern int16_t ref_yaw_angle;
+extern float px_ref;    //set desired x (MOCAP coordinate)
+extern float py_ref;    //set desired y (MOCAP coordinate)
+extern float pz_ref;    //set desired height (MOCAP coordinate)
+extern float bvx_ref;   //body_x velocity ref
+extern float last_x;
+extern float last_y;
+
+//for trajectory
+enum flight_task_list{
+    take_off = 0,
+    switch_to_hover = 1,
+    level_flight = 2,
+    left_bankturn = 3,
+    right_bankturn = 4,
+    switch_back_hover = 5,
+    slow_landing = 6,
+    straight_flight = 7,
+    left_turn = 8
+};
+void trajectory_generator(uint8_t flight_task_order);
+void voltage_manergor(int16_t *flight_task, uint16_t voltage);
+extern int16_t flight_task;
+extern bool landing_trigger;
+extern bool stop;
+
+//for test motor
+void thrsut_curve_n_point(int8_t n_interval, int16_t time_interval, int16_t max_throttle, int16_t min_throttle, int c_store);
 

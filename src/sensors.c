@@ -7,6 +7,9 @@
 #include "mw.h"
 #include "buzzer.h"
 
+#define BARO
+#define MAG
+
 uint16_t calibratingA = 0;      // the calibration is done is the main loop. Calibrating decreases at each cycle down to 0, then we enter in a normal mode.
 uint16_t calibratingB = 0;      // baro calibration = get new ground pressure value
 uint16_t calibratingG = 0;
@@ -32,28 +35,29 @@ uint8_t magHardware = MAG_DEFAULT;
 bool sensorsAutodetect(void)
 {
     int16_t deg, min;
-    mpu_params_t mpu_config;
-    bool haveMpu = false;
 #ifndef CJMCU
     drv_adxl345_config_t acc_params;
+    bool haveMpu65 = false;
 #endif
+    bool haveMpu6k = false;
 
-    // mpu driver parameters
-    mpu_config.lpf = mcfg.gyro_lpf;
-    // Autodetect Invensense acc/gyro hardware
-    haveMpu = mpuDetect(&acc, &gyro, &mpu_config);
-
-    // MPU6500 on I2C bus
-    if (hse_value == 12000000 && mpu_config.deviceType == MPU_65xx_I2C)
-        hw_revision = NAZE32_REV6;
-
+    // Autodetect gyro hardware. We have MPU3050 or MPU6050 or MPU6500 on SPI
+    if (mpu6050Detect(&acc, &gyro, mcfg.gyro_lpf, &core.mpu6050_scale)) {
+        // this filled up  acc.* struct with init values
+        haveMpu6k = true;
+    } else
 #ifndef CJMCU
-    if (!haveMpu) {
-        // Try some other gyros or bail out if fail
-        if (!l3g4200dDetect(&gyro, mcfg.gyro_lpf))
-            return false;
-    }
+        if (hw_revision == NAZE32_SP && mpu6500Detect(&acc, &gyro, mcfg.gyro_lpf))
+            haveMpu65 = true;
+        else if (l3g4200dDetect(&gyro, mcfg.gyro_lpf)) {
+        // well, we found our gyro
+        ;
+    } else if (!mpu3050Detect(&gyro, mcfg.gyro_lpf))
 #endif
+    {
+        // if this fails, we get a beep + blink pattern. we're doomed, no gyro or i2c error.
+        return false;
+    }
 
     // Accelerometer. Fuck it. Let user break shit.
 retry:
@@ -73,7 +77,8 @@ retry:
             ; // fallthrough
 #endif
         case ACC_MPU6050: // MPU6050
-            if (haveMpu && mpu_config.deviceType == MPU_60x0) {
+            if (haveMpu6k) {
+                mpu6050Detect(&acc, &gyro, mcfg.gyro_lpf, &core.mpu6050_scale); // yes, i'm rerunning it again.  re-fill acc struct
                 accHardware = ACC_MPU6050;
                 if (mcfg.acc_hardware == ACC_MPU6050)
                     break;
@@ -81,7 +86,8 @@ retry:
             ; // fallthrough
 #ifdef NAZE
         case ACC_MPU6500: // MPU6500
-            if (haveMpu && (mpu_config.deviceType >= MPU_65xx_I2C)) {
+            if (haveMpu65) {
+                mpu6500Detect(&acc, &gyro, mcfg.gyro_lpf); // yes, i'm rerunning it again.  re-fill acc struct
                 accHardware = ACC_MPU6500;
                 if (mcfg.acc_hardware == ACC_MPU6500)
                     break;
@@ -117,15 +123,13 @@ retry:
 
 #ifdef BARO
     // Detect what pressure sensors are available. baro->update() is set to sensor-specific update function
-    if (!bmp280Detect(&baro)) {
-        if (!bmp085Detect(&baro)) {
-            // ms5611 disables BMP085, and tries to initialize + check PROM crc.
-            // moved 5611 init here because there have been some reports that calibration data in BMP180
-            // has been "passing" ms5611 PROM crc check
-            if (!ms5611Detect(&baro)) {
-                // if both failed, we don't have anything
-                sensorsClear(SENSOR_BARO);
-            }
+    if (!bmp085Detect(&baro)) {
+        // ms5611 disables BMP085, and tries to initialize + check PROM crc. 
+        // moved 5611 init here because there have been some reports that calibration data in BMP180
+        // has been "passing" ms5611 PROM crc check
+        if (!ms5611Detect(&baro)) {
+            // if both failed, we don't have anything
+            sensorsClear(SENSOR_BARO);
         }
     }
 #endif
@@ -137,7 +141,7 @@ retry:
     gyro.init(mcfg.gyro_align);
 
 #ifdef MAG
-retryMag:
+    retryMag:
     switch (mcfg.mag_hardware) {
         case MAG_NONE: // disable MAG
             sensorsClear(SENSOR_MAG);
@@ -146,12 +150,12 @@ retryMag:
 
         case MAG_HMC5883L:
             if (hmc5883lDetect(&mag)) {
-                magHardware = MAG_HMC5883L;
-                if (mcfg.mag_hardware == MAG_HMC5883L)
-                    break;
-            }
-            ; // fallthrough
-
+              magHardware = MAG_HMC5883L;
+              if (mcfg.mag_hardware == MAG_HMC5883L)
+                break;
+          }
+        ; // fallthrough
+          
 #ifdef NAZE
         case MAG_AK8975:
             if (ak8975detect(&mag)) {
@@ -161,7 +165,7 @@ retryMag:
             }
 #endif
     }
-
+    
     // Found anything? Check if user fucked up or mag is really missing.
     if (magHardware == MAG_DEFAULT) {
         if (mcfg.mag_hardware > MAG_DEFAULT && mcfg.mag_hardware < MAG_NONE) {
@@ -193,7 +197,7 @@ uint16_t RSSI_getValue(void)
     if (mcfg.rssi_aux_channel > 0) {
         const int16_t rssiChannelData = rcData[AUX1 + mcfg.rssi_aux_channel - 1];
         // Range of rssiChannelData is [1000;2000]. rssi should be in [0;1023];
-        value = (uint16_t)((constrain(rssiChannelData - 1000, 0, mcfg.rssi_aux_max) / (float) mcfg.rssi_aux_max) * 1023.0f);
+        value = (uint16_t)((constrain(rssiChannelData - 1000, 0, 1000) / 1000.0f) * 1023.0f);
     } else if (mcfg.rssi_adc_channel > 0) {
         const int16_t rssiData = (((int32_t)(adcGetChannel(ADC_RSSI) - mcfg.rssi_adc_offset)) * 1023L) / mcfg.rssi_adc_max;
         // Set to correct range [0;1023]
@@ -215,11 +219,11 @@ uint16_t batteryAdcToVoltage(uint16_t src)
 int32_t currentSensorToCentiamps(uint16_t src)
 {
     int32_t millivolts;
-
+    
     millivolts = ((uint32_t)src * ADCVREF * 100) / 4095;
     millivolts -= mcfg.currentoffset;
-
-    return (millivolts * 1000) / (int32_t)mcfg.currentscale; // current in 0.01A steps
+    
+    return (millivolts * 1000) / (int32_t)mcfg.currentscale; // current in 0.01A steps 
 }
 
 void batteryInit(void)
@@ -377,7 +381,8 @@ int Baro_update(void)
 }
 #endif /* BARO */
 
-typedef struct stdev_t {
+typedef struct stdev_t
+{
     float m_oldM, m_newM, m_oldS, m_newS;
     int m_n;
 } stdev_t;
@@ -501,7 +506,7 @@ int Mag_getADC(void)
     }
 
     if (tCal != 0) {
-        if ((t - tCal) < 30000000) {    // 30s: you have 30s to turn the multi in all directions
+        if ((t - tCal) < 15000000) {    // 30s: you have 30s to turn the multi in all directions
             LED0_TOGGLE;
             for (axis = 0; axis < 3; axis++) {
                 if (magADC[axis] < magZeroTempMin[axis])

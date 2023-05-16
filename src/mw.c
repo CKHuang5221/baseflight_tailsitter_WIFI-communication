@@ -4,11 +4,25 @@
  */
 #include "board.h"
 #include "mw.h"
-
 #include "cli.h"
 #include "telemetry_common.h"
-
+#include "blackbox.h"
 #include "buzzer.h"
+
+#define BARO
+#define MAG
+#define ATTITUDE_TUNING           //use this if you "ONLY" want to tuning attitude controller
+//#define POSITION_TUNING           //use this if you want to tuning postion controller before actual fly, NEED TO CHOOSE YOUR OWN "magHold" !
+//#define FLY_BY_ATTITUDE_CONTROL   //fly by attitude control,no x,y position control
+
+#ifdef BLACKBOX
+    #include "blackbox.h"
+#endif
+
+uint8_t gpsstate;
+uint8_t gpstypecheck;
+uint8_t gpsInitUbloxcheck;
+uint8_t ubx_init_statecheck;
 
 flags_t f;
 int16_t debug[4];
@@ -18,8 +32,12 @@ uint16_t cycleTime = 0;         // this is the number in micro second to achieve
 int16_t headFreeModeHold;
 
 uint16_t vbat;                  // battery voltage in 0.1V steps
+uint16_t vbatLatest = 0;
+
+int16_t taskOrdercheck;
+
 int32_t amperage;               // amperage read by current sensor in centiampere (1/100th A)
-int32_t mAhdrawn;              // milliampere hours drawn from the battery since start
+int32_t mAhdrawn;               // milliampere hours drawn from the battery since start
 int16_t telemTemperature1;      // gyro sensor temperature
 
 int16_t failsafeCnt = 0;
@@ -30,17 +48,22 @@ int16_t lookupPitchRollRC[PITCH_LOOKUP_LENGTH];     // lookup table for expo & R
 int16_t lookupThrottleRC[THROTTLE_LOOKUP_LENGTH];   // lookup table for expo & mid THROTTLE
 uint16_t rssi;                  // range: [0;1023]
 rcReadRawDataPtr rcReadRawFunc = NULL;  // receive data from default (pwm/ppm) or additional (spek/sbus/?? receiver drivers)
+int16_t store_alt = 0;
+int16_t store_pwm[5];
 
-static void pidMultiWii(void);
-static void pidRewrite(void);
-pidControllerFuncPtr pid_controller = pidMultiWii; // which pid controller are we using, defaultMultiWii
+//static void pidMultiWii(void);
+//static void pidRewrite(void);
+//pidControllerFuncPtr pid_controller = pidMultiWii; // which pid controller are we using, defaultMultiWii
 
-uint8_t dynP8[3], dynI8[3], dynD8[3];
+//uint8_t dynP8[3], dynI8[3], dynD8[3];
 uint8_t rcOptions[CHECKBOXITEMS];
 
-int16_t axisPID[3];
+//int16_t axisPID[3];
 
-// **********************
+//int32_t axisPID_P[3], axisPID_I[3], axisPID_D[3];
+
+static int16_t initialThrottle = 0;
+
 // GPS
 // **********************
 int32_t GPS_coord[2];
@@ -71,15 +94,55 @@ bool AccInflightCalibrationArmed = false;
 bool AccInflightCalibrationMeasurementDone = false;
 bool AccInflightCalibrationSavetoEEProm = false;
 bool AccInflightCalibrationActive = false;
+bool calibrating = false;
 uint16_t InflightcalibratingA = 0;
 
 // Battery monitoring stuff
-uint8_t batteryCellCount = 3;       // cell count
+uint8_t batteryCellCount = 2;       // cell count
 uint16_t batteryWarningVoltage;     // slow buzzer after this one, recommended 80% of battery used. Time to land.
 uint16_t batteryCriticalVoltage;    // annoying buzzer after this one, battery is going to be dead.
 
 // Time of automatic disarm when "Don't spin the motors when armed" is enabled.
-static uint32_t disarmTime = 0;
+//static uint32_t disarmTime = 0;
+
+// stop flag
+bool stop = false;
+bool landing = false;
+bool mode1 = false;
+bool mode2 = false;
+
+//wifidata add at 202221102
+float rigidbody_x,rigidbody_y,rigidbody_z;
+float original_x = 0.0f;
+float original_y = 0.0f;
+float original_z = 0.0f;    
+int16_t lost_gps_check_count = 0;
+
+// for controller
+bool org_init = false;
+bool mode1_trigger = false;
+bool mode2_trigger = true;
+bool mode3_trigger = true;
+bool landing_trigger = false;
+int16_t OX;
+int16_t OY;
+int16_t OZ;
+quaternion quat_hold;
+int16_t rcCommand_store[4];
+float align_maghold_sine;
+float align_maghold_cosine;
+float last_x;
+float last_y;
+int16_t auxState_log;
+int16_t ref_roll_angle;
+int16_t ref_pitch_angle;
+int16_t ref_yaw_angle;
+float px_ref;    //set desired x (MOCAP coordinate)
+float py_ref;    //set desired y (MOCAP coordinate)
+float pz_ref;    //set desired height (MOCAP coordinate)
+float bvx_ref;   //body_x velocity ref
+int16_t flight_task = 0;
+bool bankturn_task = false;
 
 void blinkLED(uint8_t num, uint8_t wait, uint8_t repeat)
 {
@@ -99,9 +162,8 @@ void blinkLED(uint8_t num, uint8_t wait, uint8_t repeat)
 void annexCode(void)
 {
     static uint32_t calibratedAccTime;
-    int32_t tmp, tmp2;
-    int32_t axis, prop1, prop2;
-    static uint16_t MaxBrkpoint = 300; // Max angle of APA
+//    int32_t tmp, tmp2;
+//    int32_t axis, prop1, prop2;
 
     // vbat shit
     static uint8_t vbatTimer = 0;
@@ -110,93 +172,48 @@ void annexCode(void)
     static int64_t mAhdrawnRaw = 0;
     static int32_t vbatCycleTime = 0;
 
-    if (!f.FIXED_WING) { // Baseflight original dynamic PID adjustemnt
-        // PITCH & ROLL only dynamic PID adjustemnt,  depending on throttle value
-        if (rcData[THROTTLE] < cfg.tpa_breakpoint) {
-            prop2 = 100;
-        } else {
-            if (rcData[THROTTLE] < 2000) {
-                prop2 = 100 - (uint16_t)cfg.dynThrPID * (rcData[THROTTLE] - cfg.tpa_breakpoint) / (2000 - cfg.tpa_breakpoint);
-            } else {
-                prop2 = 100 - cfg.dynThrPID;
-            }
-        }
-    } else {
-        // Throttle & Angle combined PID Attenuation
-        // Will dampen the PID's in High speeds dive on Fixed Wing Only
-        prop2 = 128; // prop2 was 100, is 128 now
-        if (rcData[THROTTLE] < cfg.tpa_breakpoint) {
-            prop2 = 128; // Higher prop2 for Fixed wing Same as used in MWii
-        } else {
-            if (rcCommand[THROTTLE] > cfg.dynThrPID) { // Using rcCommand() to include Tpa even in Gps modes.
-                if (rcCommand[THROTTLE] < 2000) {
-                    prop2 -=  ((uint16_t)cfg.dynThrPID * (rcCommand[THROTTLE] - cfg.dynThrPID) >> 9);
-                } else {
-                    prop2 -=  cfg.dynThrPID;
-                }
-            }
-        }
-        // APA dynamic PID adjustemnt, depending on Angle of attack
-        if (angle[1] > 20)
-            prop2 -= ((uint16_t)cfg.dynThrPID * (min(angle[1], MaxBrkpoint)) >> 8);
-        prop2 = max((128 - cfg.dynThrPID), prop2);
+	if (count > 1500 && rcData[0] >= 1300){    // Mode 1 , enable initialThrottle
+		initialThrottle = 1;
     }
 
+	if (initialThrottle == 1){
+        if(mode1){      // Mode 1 manual input 
+            rcCommand[THROTTLE] = (rcData[0] - rcCommand_store[0]) / 2;
+            rcCommand[ROLL] = (rcData[2] - rcCommand_store[2]) / 9;
+            rcCommand[PITCH] = (rcData[3] - rcCommand_store[3]) / 130;
 
-    for (axis = 0; axis < 3; axis++) {
-        tmp = min(abs(rcData[axis] - mcfg.midrc), 500);
-        if (axis != 2) {        // ROLL & PITCH
-            if (cfg.deadband) {
-                if (tmp > cfg.deadband) {
-                    tmp -= cfg.deadband;
-                } else {
-                    tmp = 0;
-                }
+            if(count % 30 == 0){
+                rcCommand[YAW] = rcCommand[YAW] + (rcData[1] - rcCommand_store[1])/130;
             }
 
-            tmp2 = tmp / 100;
-            rcCommand[axis] = lookupPitchRollRC[tmp2] + (tmp - tmp2 * 100) * (lookupPitchRollRC[tmp2 + 1] - lookupPitchRollRC[tmp2]) / 100;
-            prop1 = 100 - (uint16_t)cfg.rollPitchRate[axis] * tmp / 500;
-            prop1 = (uint16_t)prop1 * prop2 / 100;
-        } else {                // YAW
-            if (cfg.yawdeadband) {
-                if (tmp > cfg.yawdeadband) {
-                    tmp -= cfg.yawdeadband;
-                } else {
-                    tmp = 0;
-                }
-            }
-            rcCommand[axis] = tmp * -mcfg.yaw_control_direction;
-            prop1 = 100 - (uint16_t)cfg.yawRate * abs(tmp) / 500;
+            if (rcCommand[YAW] > 360)
+                rcCommand[YAW] -= 360;
+            if (rcCommand[YAW] < -360)
+                rcCommand[YAW] += 360;  
         }
-        dynP8[axis] = (uint16_t)cfg.P8[axis] * prop1 / 100;
-        dynI8[axis] = (uint16_t)cfg.I8[axis] * prop1 / 100;
-        dynD8[axis] = (uint16_t)cfg.D8[axis] * prop1 / 100;
-        if (rcData[axis] < mcfg.midrc)
-            rcCommand[axis] = -rcCommand[axis];
-    }
+        if(mode2){      // Mode 2 manual input    
+            rcCommand[THROTTLE] = (rcData[0] - rcCommand_store[0]) / 2;
+            rcCommand[ROLL] = (rcData[2] - rcCommand_store[2]) / 9;
+            rcCommand[PITCH] = (rcData[3] - rcCommand_store[3]) / 130;
 
-    tmp = constrain(rcData[THROTTLE], mcfg.mincheck, 2000);
-    tmp = (uint32_t)(tmp - mcfg.mincheck) * 1000 / (2000 - mcfg.mincheck);       // [MINCHECK;2000] -> [0;1000]
-    tmp2 = tmp / 100;
-    rcCommand[THROTTLE] = lookupThrottleRC[tmp2] + (tmp - tmp2 * 100) * (lookupThrottleRC[tmp2 + 1] - lookupThrottleRC[tmp2]) / 100;    // [0;1000] -> expo -> [MINTHROTTLE;MAXTHROTTLE]
-
-    if (f.HEADFREE_MODE) {
-        float radDiff = (heading - headFreeModeHold) * M_PI / 180.0f;
-        float cosDiff = cosf(radDiff);
-        float sinDiff = sinf(radDiff);
-        int16_t rcCommand_PITCH = rcCommand[PITCH] * cosDiff + rcCommand[ROLL] * sinDiff;
-        rcCommand[ROLL] = rcCommand[ROLL] * cosDiff - rcCommand[PITCH] * sinDiff;
-        rcCommand[PITCH] = rcCommand_PITCH;
-    }
+            if(count % 30 == 0){
+                rcCommand[YAW] = rcCommand[YAW] + (rcData[1] - rcCommand_store[1])/130;
+            }		
+            if (rcCommand[YAW] > 360)
+                rcCommand[YAW] -= 360;
+            if (rcCommand[YAW] < -360)
+                rcCommand[YAW] += 360; 
+        }
+    }		
 
     if (feature(FEATURE_VBAT)) {
         vbatCycleTime += cycleTime;
         if (!(++vbatTimer % VBATFREQ)) {
             vbatRaw -= vbatRaw / 8;
-            vbatRaw += adcGetChannel(ADC_BATTERY);
+            vbatLatest = adcGetChannel(ADC_BATTERY);
+            vbatRaw += vbatLatest;
             vbat = batteryAdcToVoltage(vbatRaw / 8);
-
+            
             if (mcfg.power_adc_channel > 0) {
                 amperageRaw -= amperageRaw / 8;
                 amperageRaw += adcGetChannel(ADC_EXTERNAL_CURRENT);
@@ -205,7 +222,7 @@ void annexCode(void)
                 mAhdrawn = mAhdrawnRaw / (3600 * 100);
                 vbatCycleTime = 0;
             }
-
+            
         }
         // Buzzers for low and critical battery levels
         if (vbat <= batteryCriticalVoltage)
@@ -213,9 +230,7 @@ void annexCode(void)
         else if (vbat <= batteryWarningVoltage)
             buzzer(BUZZER_BAT_LOW);     // low battery
     }
-    // update buzzer handler
-    buzzerUpdate();
-
+		
     if ((calibratingA > 0 && sensors(SENSOR_ACC)) || (calibratingG > 0)) {      // Calibration phasis
         LED0_TOGGLE;
     } else {
@@ -223,21 +238,7 @@ void annexCode(void)
             LED0_OFF;
         if (f.ARMED)
             LED0_ON;
-
-#ifndef CJMCU
-        checkTelemetryState();
-#endif
     }
-
-#ifdef LEDRING
-    if (feature(FEATURE_LED_RING)) {
-        static uint32_t LEDTime;
-        if ((int32_t)(currentTime - LEDTime) >= 0) {
-            LEDTime = currentTime + 50000;
-            ledringState();
-        }
-    }
-#endif
 
     if ((int32_t)(currentTime - calibratedAccTime) >= 0) {
         if (!f.SMALL_ANGLE) {
@@ -251,12 +252,6 @@ void annexCode(void)
 
     serialCom();
 
-#ifndef CJMCU
-    if (!cliMode && feature(FEATURE_TELEMETRY)) {
-        handleTelemetry();
-    }
-#endif
-
     if (sensors(SENSOR_GPS)) {
         static uint32_t GPSLEDTime;
         if ((int32_t)(currentTime - GPSLEDTime) >= 0 && (GPS_numSat >= 5)) {
@@ -264,13 +259,10 @@ void annexCode(void)
             LED1_TOGGLE;
         }
     }
-
     // Read out gyro temperature. can use it for something somewhere. maybe get MCU temperature instead? lots of fun possibilities.
     if (gyro.temperature)
         gyro.temperature(&telemTemperature1);
-    else {
-        // TODO MCU temp
-    }
+
 }
 
 uint16_t pwmReadRawRC(uint8_t chan)
@@ -284,13 +276,13 @@ void computeRC(void)
     int i, chan;
 
     if (feature(FEATURE_SERIALRX)) {
-        for (chan = 0; chan < mcfg.rc_channel_count; chan++)
+        for (chan = 0; chan < 8; chan++)
             rcData[chan] = rcReadRawFunc(chan);
     } else {
-        static int16_t rcDataAverage[RC_CHANS][4];
+        static int16_t rcDataAverage[8][4];
         static int rcAverageIndex = 0;
 
-        for (chan = 0; chan < mcfg.rc_channel_count; chan++) {
+        for (chan = 0; chan < 8; chan++) {
             capture = rcReadRawFunc(chan);
 
             // validate input
@@ -314,19 +306,34 @@ static void mwArm(void)
         // TODO: && ( !feature || ( feature && ( failsafecnt > 2) )
         if (!f.ARMED) {         // arm now!
             f.ARMED = 1;
-            headFreeModeHold = heading;
-            // Beep for inform about arming
-#ifdef GPS
-            if (feature(FEATURE_GPS) && f.GPS_FIX && GPS_numSat >= 5)
-                buzzer(BUZZER_ARMING_GPS_FIX);
-            else
-                buzzer(BUZZER_ARMING);
-#else
-            buzzer(BUZZER_ARMING);
+			stop = false;
+            rcCommand_store[0] = rcData[0];
+            rcCommand_store[1] = rcData[1];
+            rcCommand_store[2] = rcData[2];
+            rcCommand_store[3] = rcData[3];
+            magHold = (int16_t)(quaternionyaw/10);
+            org_init = true;
+            quat_hold.w = q.w;
+            quat_hold.x = q.x;
+            quat_hold.y = q.y;
+            quat_hold.z = q.z;
+
+            float dir;  //for align mocap coordinate to earth coordinate
+            dir = DEGREES_TO_RADIANS( (float)(-magHold) );
+            align_maghold_sine = sin_approx( dir );
+            align_maghold_cosine = cos_approx( dir );
+
+#ifdef ATTITUDE_TUNING
+            desired_quaternion.w = q.w;
+            desired_quaternion.x = q.x;
+            desired_quaternion.y = q.y;
+            desired_quaternion.z = q.z;
+#endif
+
+#ifdef BLACKBOX
+            	startBlackbox();
 #endif
         }
-    } else if (!f.ARMED) {
-        blinkLED(2, 255, 1);
     }
 }
 
@@ -334,166 +341,48 @@ static void mwDisarm(void)
 {
     if (f.ARMED) {
         f.ARMED = 0;
-        // Beep for inform about disarming
-        buzzer(BUZZER_DISARMING);
-        // Reset disarm time so that it works next time we arm the board.
-        if (disarmTime != 0)
-            disarmTime = 0;
+        mode1 = false;
+        mode2 = false;
+        landing = false;
+		stop = true;
+		initialThrottle = 0;
+			
+#ifdef BLACKBOX
+        	finishBlackbox();
+#endif
+				
     }
 }
 
-static void mwVario(void)
-{
-
+void align_MOCAP_coordinat_to_earth_coordinate(float *mocap_x, float *mocap_y){
+//this function is rotate 'optitrack xy direction' align 'maghold' before we start position_controller, 
+//since we might have different maghold everytime or every experiment setup.
+    float tmp;
+    tmp = *mocap_x;
+    *mocap_x = *mocap_x * align_maghold_cosine + *mocap_y * align_maghold_sine * (-1.0f);
+    *mocap_y = tmp * align_maghold_sine + *mocap_y * align_maghold_cosine;
 }
 
-static int32_t errorGyroI[3] = { 0, 0, 0 };
-static int32_t errorAngleI[2] = { 0, 0 };
-
-static void pidMultiWii(void)
-{
-    int axis, prop;
-    int32_t error, errorAngle;
-    int32_t PTerm, ITerm, PTermACC = 0, ITermACC = 0, PTermGYRO = 0, ITermGYRO = 0, DTerm;
-    static int16_t lastGyro[3] = { 0, 0, 0 };
-    static int32_t delta1[3], delta2[3];
-    int32_t deltaSum;
-    int32_t delta;
-
-    // **** PITCH & ROLL & YAW PID ****
-    prop = max(abs(rcCommand[PITCH]), abs(rcCommand[ROLL])); // range [0;500]
-    for (axis = 0; axis < 3; axis++) {
-        if ((f.ANGLE_MODE || f.HORIZON_MODE) && axis < 2) { // MODE relying on ACC
-            // 50 degrees max inclination
-            errorAngle = constrain(2 * rcCommand[axis] + GPS_angle[axis], -((int)mcfg.max_angle_inclination), +mcfg.max_angle_inclination) - angle[axis] + cfg.angleTrim[axis];
-            PTermACC = errorAngle * cfg.P8[PIDLEVEL] / 100; // 32 bits is needed for calculation: errorAngle*P8[PIDLEVEL] could exceed 32768   16 bits is ok for result
-            PTermACC = constrain(PTermACC, -cfg.D8[PIDLEVEL] * 5, +cfg.D8[PIDLEVEL] * 5);
-
-            errorAngleI[axis] = constrain(errorAngleI[axis] + errorAngle, -10000, +10000); // WindUp
-            ITermACC = (errorAngleI[axis] * cfg.I8[PIDLEVEL]) >> 12;
-        }
-        if (!f.ANGLE_MODE || f.HORIZON_MODE || axis == 2) { // MODE relying on GYRO or YAW axis
-            error = (int32_t)rcCommand[axis] * 10 * 8 / cfg.P8[axis];
-            error -= gyroData[axis];
-
-            PTermGYRO = rcCommand[axis];
-
-            errorGyroI[axis] = constrain(errorGyroI[axis] + error, -16000, +16000); // WindUp
-            if ((abs(gyroData[axis]) > 640) || ((axis == YAW) && (abs(rcCommand[axis]) > 100)))
-                errorGyroI[axis] = 0;
-            ITermGYRO = (errorGyroI[axis] / 125 * cfg.I8[axis]) >> 6;
-        }
-        if (f.HORIZON_MODE && axis < 2) {
-            PTerm = (PTermACC * (500 - prop) + PTermGYRO * prop) / 500;
-            ITerm = (ITermACC * (500 - prop) + ITermGYRO * prop) / 500;
-        } else {
-            if (f.ANGLE_MODE && axis < 2) {
-                PTerm = PTermACC;
-                ITerm = ITermACC;
-            } else {
-                PTerm = PTermGYRO;
-                ITerm = ITermGYRO;
-            }
-        }
-
-        PTerm -= (int32_t)gyroData[axis] * dynP8[axis] / 10 / 8; // 32 bits is needed for calculation
-        delta = gyroData[axis] - lastGyro[axis];
-        lastGyro[axis] = gyroData[axis];
-        deltaSum = delta1[axis] + delta2[axis] + delta;
-        delta2[axis] = delta1[axis];
-        delta1[axis] = delta;
-        DTerm = (deltaSum * dynD8[axis]) / 32;
-        axisPID[axis] = PTerm + ITerm - DTerm;
+#ifdef GPS
+void lost_gps_check(void){
+    if(gpsstate == 5){          //we lost gps 
+        lost_gps_check_count++;
+    }
+    else{
+        lost_gps_check_count = 0;
     }
 }
+#endif
 
-#define GYRO_I_MAX 256
-
-static void pidRewrite(void)
-{
-    int32_t errorAngle = 0;
-    int axis;
-    int32_t delta, deltaSum;
-    static int32_t delta1[3], delta2[3];
-    int32_t PTerm, ITerm, DTerm;
-    static int32_t lastError[3] = { 0, 0, 0 };
-    int32_t AngleRateTmp, RateError;
-
-    // ----------PID controller----------
-    for (axis = 0; axis < 3; axis++) {
-        // -----Get the desired angle rate depending on flight mode
-        if (axis == 2) { // YAW is always gyro-controlled (MAG correction is applied to rcCommand)
-            AngleRateTmp = (((int32_t)(cfg.yawRate + 27) * rcCommand[YAW]) >> 5);
-        } else {
-            // calculate error and limit the angle to 50 degrees max inclination
-            errorAngle = (constrain(rcCommand[axis] + GPS_angle[axis], -500, +500) - angle[axis] + cfg.angleTrim[axis]) / 10.0f; // 16 bits is ok here
-            if (!f.ANGLE_MODE) { //control is GYRO based (ACRO and HORIZON - direct sticks control is applied to rate PID
-                AngleRateTmp = ((int32_t)(cfg.rollPitchRate[axis] + 27) * rcCommand[axis]) >> 4;
-
-                if (f.HORIZON_MODE) {
-                    // mix up angle error to desired AngleRateTmp to add a little auto-level feel
-                    AngleRateTmp += (errorAngle * cfg.I8[PIDLEVEL]) >> 8;
-                }
-            } else { // it's the ANGLE mode - control is angle based, so control loop is needed
-                AngleRateTmp = (errorAngle * cfg.P8[PIDLEVEL]) >> 4;
-            }
-        }
-
-        // --------low-level gyro-based PID. ----------
-        // Used in stand-alone mode for ACRO, controlled by higher level regulators in other modes
-        // -----calculate scaled error.AngleRates
-        // multiplication of rcCommand corresponds to changing the sticks scaling here
-        RateError = AngleRateTmp - gyroData[axis];
-
-        // -----calculate P component
-        PTerm = (RateError * cfg.P8[axis]) >> 7;
-        // -----calculate I component
-        // there should be no division before accumulating the error to integrator, because the precision would be reduced.
-        // Precision is critical, as I prevents from long-time drift. Thus, 32 bits integrator is used.
-        // Time correction (to avoid different I scaling for different builds based on average cycle time)
-        // is normalized to cycle time = 2048.
-        errorGyroI[axis] = errorGyroI[axis] + ((RateError * cycleTime) >> 11) * cfg.I8[axis];
-
-        // limit maximum integrator value to prevent WindUp - accumulating extreme values when system is saturated.
-        // I coefficient (I8) moved before integration to make limiting independent from PID settings
-        errorGyroI[axis] = constrain(errorGyroI[axis], (int32_t)(-GYRO_I_MAX) << 13, (int32_t)(+GYRO_I_MAX) << 13);
-        ITerm = errorGyroI[axis] >> 13;
-
-        //-----calculate D-term
-        delta = RateError - lastError[axis];  // 16 bits is ok here, the dif between 2 consecutive gyro reads is limited to 800
-        lastError[axis] = RateError;
-
-        // Correct difference by cycle time. Cycle time is jittery (can be different 2 times), so calculated difference
-        // would be scaled by different dt each time. Division by dT fixes that.
-        delta = (delta * ((uint16_t)0xFFFF / (cycleTime >> 4))) >> 6;
-        // add moving average here to reduce noise
-        deltaSum = delta1[axis] + delta2[axis] + delta;
-        delta2[axis] = delta1[axis];
-        delta1[axis] = delta;
-        DTerm = (deltaSum * cfg.D8[axis]) >> 8;
-
-        // -----calculate total PID output
-        axisPID[axis] = PTerm + ITerm + DTerm;
-    }
-}
-
-void setPIDController(int type)
-{
-    switch (type) {
-        case 0:
-        default:
-            pid_controller = pidMultiWii;
-            break;
-        case 1:
-            pid_controller = pidRewrite;
-            break;
-    }
-}
-
+int16_t roll_cmd = 0, pitch_cmd = 0, yaw_cmd = 0, thrust_cmd = 0;
 void loop(void)
 {
     static uint8_t rcDelayCommand;      // this indicates the number of time (multiple of RC measurement at 50Hz) the sticks must be maintained to run or switch off motors
     static uint8_t rcSticks;            // this hold sticks position for command combos
+	static int flag = 0;
+	static int m1_count_store;
+    static int m2_count_store;
+    static int m3_count_store;
     uint8_t stTmp = 0;
     int i;
     static uint32_t rcTime = 0;
@@ -501,11 +390,13 @@ void loop(void)
     static int16_t initialThrottleHold;
 #endif
     static uint32_t loopTime;
-    uint32_t auxState = 0;
+    uint16_t auxState = 0;
+
 #ifdef GPS
     static uint8_t GPSNavReset = 1;
-#endif
-    bool isThrottleLow = false;
+#endif	
+
+//    bool isThrottleLow = false;
     bool rcReady = false;
 
     // calculate rc stuff from serial-based receivers (spek/sbus)
@@ -524,9 +415,6 @@ void loop(void)
             case SERIALRX_MSP:
                 rcReady = mspFrameComplete();
                 break;
-            case SERIALRX_IBUS:
-                rcReady = ibusFrameComplete();
-                break;
         }
     }
 
@@ -535,37 +423,8 @@ void loop(void)
         rcTime = currentTime + 20000;
         computeRC();
 
-        // in 3D mode, we need to be able to disarm by switch at any time
-        if (feature(FEATURE_3D)) {
-            if (!rcOptions[BOXARM])
-                mwDisarm();
-        }
-
         // Read rssi value
         rssi = RSSI_getValue();
-
-        // Failsafe routine
-        if (feature(FEATURE_FAILSAFE) || feature(FEATURE_FW_FAILSAFE_RTH)) {
-            if (failsafeCnt > (5 * cfg.failsafe_delay) && f.ARMED) { // Stabilize, and set Throttle to specified level
-                for (i = 0; i < 3; i++)
-                    rcData[i] = mcfg.midrc;      // after specified guard time after RC signal is lost (in 0.1sec)
-                rcData[THROTTLE] = cfg.failsafe_throttle;
-                buzzer(BUZZER_TX_LOST_ARMED);
-                if ((failsafeCnt > 5 * (cfg.failsafe_delay + cfg.failsafe_off_delay)) && !f.FW_FAILSAFE_RTH_ENABLE) {  // Turn OFF motors after specified Time (in 0.1sec)
-                    mwDisarm();             // This will prevent the copter to automatically rearm if failsafe shuts it down and prevents
-                    f.OK_TO_ARM = 0;        // to restart accidentely by just reconnect to the tx - you will have to switch off first to rearm
-                    buzzer(BUZZER_TX_LOST);
-                }
-                failsafeEvents++;
-            }
-            if (failsafeCnt > (5 * cfg.failsafe_delay) && !f.ARMED) {  // Turn off "Ok To arm to prevent the motors from spinning after repowering the RX with low throttle and aux to arm
-                mwDisarm();         // This will prevent the copter to automatically rearm if failsafe shuts it down and prevents
-                f.OK_TO_ARM = 0;    // to restart accidentely by just reconnect to the tx - you will have to switch off first to rearm
-                buzzer(BUZZER_TX_LOST);
-            }
-            failsafeCnt++;
-        }
-        // end of failsafe routine - next change is made with RcOptions setting
 
         // ------------------ STICKS COMMAND HANDLER --------------------
         // checking sticks positions
@@ -583,237 +442,61 @@ void loop(void)
             rcDelayCommand = 0;
         rcSticks = stTmp;
 
-        // perform actions
-        if (feature(FEATURE_3D) && (rcData[THROTTLE] > (mcfg.midrc - mcfg.deadband3d_throttle) && rcData[THROTTLE] < (mcfg.midrc + mcfg.deadband3d_throttle)))
-            isThrottleLow = true;
-        else if (!feature(FEATURE_3D) && (rcData[THROTTLE] < mcfg.mincheck))
-            isThrottleLow = true;
-        if (isThrottleLow) {
-            errorGyroI[ROLL] = 0;
-            errorGyroI[PITCH] = 0;
-            errorGyroI[YAW] = 0;
-            errorAngleI[ROLL] = 0;
-            errorAngleI[PITCH] = 0;
-            if (cfg.activate[BOXARM] > 0) { // Arming via ARM BOX
-                if (rcOptions[BOXARM] && f.OK_TO_ARM)
-                    mwArm();
-            }
-        }
-
-        if (cfg.activate[BOXARM] > 0) { // Disarming via ARM BOX
-            if (!rcOptions[BOXARM] && f.ARMED) {
-                if (mcfg.disarm_kill_switch) {
-                    mwDisarm();
-                } else if (isThrottleLow) {
-                    mwDisarm();
-                }
-            }
-        }
+        // Check AUX switches
 
         if (rcDelayCommand == 20) {
             if (f.ARMED) {      // actions during armed
-                // Disarm on throttle down + yaw
-                if (cfg.activate[BOXARM] == 0 && (rcSticks == THR_LO + YAW_LO + PIT_CE + ROL_CE))
-                    mwDisarm();
-                // Disarm on roll (only when retarded_arm is enabled)
-                if (mcfg.retarded_arm && cfg.activate[BOXARM] == 0 && (rcSticks == THR_LO + YAW_CE + PIT_CE + ROL_LO))
-                    mwDisarm();
-            } else {            // actions during not armed
+
+            } 
+			else {            // actions during not armed
                 i = 0;
-                // GYRO calibration
-                if (rcSticks == THR_LO + YAW_LO + PIT_LO + ROL_CE) {
-                    calibratingG = CALIBRATING_GYRO_CYCLES;
+                // GYRO BARO calibration
+                
+                if (rcData[2] < 1200){  //use stick to activate acc,gyro and baro calibration
+                     calibratingA = CALIBRATING_ACC_CYCLES;
+                     calibratingG = CALIBRATING_GYRO_CYCLES;
+                     calibratingB = CALIBRATING_BARO_CYCLES;
 #ifdef GPS
-                    if (feature(FEATURE_GPS))
-                        GPS_reset_home_position();
+                if (feature(FEATURE_GPS))
+                    GPS_reset_home_position();
 #endif
-                    if (sensors(SENSOR_BARO))
-                        calibratingB = 10; // calibrate baro to new ground level (10 * 25 ms = ~250 ms non blocking)
-                    if (!sensors(SENSOR_MAG))
-                        heading = 0; // reset heading to zero after gyro calibration
-                    // Inflight ACC Calibration
-                } else if (feature(FEATURE_INFLIGHT_ACC_CAL) && (rcSticks == THR_LO + YAW_LO + PIT_HI + ROL_HI)) {
-                    if (AccInflightCalibrationMeasurementDone) {        // trigger saving into eeprom after landing
-                        AccInflightCalibrationMeasurementDone = false;
-                        AccInflightCalibrationSavetoEEProm = true;
-                    } else {
-                        AccInflightCalibrationArmed = !AccInflightCalibrationArmed;
-                        if (AccInflightCalibrationArmed) {
-                            buzzer(BUZZER_ACC_CALIBRATION);
-                        } else {
-                            buzzer(BUZZER_ACC_CALIBRATION_FAIL);
-                        }
-                    }
+                     LED0_TOGGLE;
                 }
-
-                // Multiple configuration profiles
-                if (rcSticks == THR_LO + YAW_LO + PIT_CE + ROL_LO)          // ROLL left  -> Profile 1
-                    i = 1;
-                else if (rcSticks == THR_LO + YAW_LO + PIT_HI + ROL_CE)     // PITCH up   -> Profile 2
-                    i = 2;
-                else if (rcSticks == THR_LO + YAW_LO + PIT_CE + ROL_HI)     // ROLL right -> Profile 3
-                    i = 3;
-                if (i) {
-                    mcfg.current_profile = i - 1;
-                    writeEEPROM(0, false);
-                    blinkLED(2, 40, i);
-                    // TODO alarmArray[0] = i;
-                }
-
-                // Arm via YAW
-                if (cfg.activate[BOXARM] == 0 && (rcSticks == THR_LO + YAW_HI + PIT_CE + ROL_CE))
-                    mwArm();
-                // Arm via ROLL
-                else if (mcfg.retarded_arm && cfg.activate[BOXARM] == 0 && (rcSticks == THR_LO + YAW_CE + PIT_CE + ROL_HI))
-                    mwArm();
-                // Calibrating Acc
-                else if (rcSticks == THR_HI + YAW_LO + PIT_LO + ROL_CE)
-                    calibratingA = CALIBRATING_ACC_CYCLES;
-                // Calibrating Mag
-                else if (rcSticks == THR_HI + YAW_HI + PIT_LO + ROL_CE)
+                if (rcData[3] < 1200){  //use stick to activate mag calibration
                     f.CALIBRATE_MAG = 1;
-                i = 0;
-                // Acc Trim
-                if (rcSticks == THR_HI + YAW_CE + PIT_HI + ROL_CE) {
-                    cfg.angleTrim[PITCH] += 2;
-                    i = 1;
-                } else if (rcSticks == THR_HI + YAW_CE + PIT_LO + ROL_CE) {
-                    cfg.angleTrim[PITCH] -= 2;
-                    i = 1;
-                } else if (rcSticks == THR_HI + YAW_CE + PIT_CE + ROL_HI) {
-                    cfg.angleTrim[ROLL] += 2;
-                    i = 1;
-                } else if (rcSticks == THR_HI + YAW_CE + PIT_CE + ROL_LO) {
-                    cfg.angleTrim[ROLL] -= 2;
-                    i = 1;
-                }
-                if (i) {
-                    writeEEPROM(1, true);
-                    rcDelayCommand = 0; // allow autorepetition
-                }
+                    LED0_TOGGLE;
+                }            
             }
         }
 
-        if (feature(FEATURE_INFLIGHT_ACC_CAL)) {
-            if (AccInflightCalibrationArmed && f.ARMED && rcData[THROTTLE] > mcfg.mincheck && !rcOptions[BOXARM]) {   // Copter is airborne and you are turning it off via boxarm : start measurement
-                InflightcalibratingA = 50;
-                AccInflightCalibrationArmed = false;
-            }
-            if (rcOptions[BOXCALIB]) {      // Use the Calib Option to activate : Calib = TRUE Meausrement started, Land and Calib = 0 measurement stored
-                if (!AccInflightCalibrationActive && !AccInflightCalibrationMeasurementDone)
-                    InflightcalibratingA = 50;
-                AccInflightCalibrationActive = true;
-            } else if (AccInflightCalibrationMeasurementDone && !f.ARMED) {
-                AccInflightCalibrationMeasurementDone = false;
-                AccInflightCalibrationSavetoEEProm = true;
-            }
-        }
-
-        // Check AUX switches
-
-        for (i = 0; i < core.numAuxChannels; i++)
+        for (i = 0; i < 2; i++)
             auxState |= (rcData[AUX1 + i] < 1300) << (3 * i) | (1300 < rcData[AUX1 + i] && rcData[AUX1 + i] < 1700) << (3 * i + 1) | (rcData[AUX1 + i] > 1700) << (3 * i + 2);
-        for (i = 0; i < CHECKBOXITEMS; i++)
-            rcOptions[i] = (auxState & cfg.activate[i]) > 0;
-        f.CRUISE_MODE = rcOptions[BOXGCRUISE];
-        if (f.CRUISE_MODE) {
-            rcOptions[BOXGPSHOLD] = true;
-            rcOptions[BOXHORIZON] = true;
-        }
-
-        // note: if FAILSAFE is disable, failsafeCnt > 5 * FAILSAVE_DELAY is always false
-        if ((rcOptions[BOXANGLE] || (failsafeCnt > 5 * cfg.failsafe_delay)) && (sensors(SENSOR_ACC))) {
-            // bumpless transfer to Level mode
-            if (!f.ANGLE_MODE) {
-                errorAngleI[ROLL] = 0;
-                errorAngleI[PITCH] = 0;
-                f.ANGLE_MODE = 1;
-            }
-            if (feature(FEATURE_FW_FAILSAFE_RTH)) {
-                if ((failsafeCnt > 5 * cfg.failsafe_delay) && sensors(SENSOR_GPS)) {
-                    f.FW_FAILSAFE_RTH_ENABLE = 1;
-                }
-            }
-        } else {
-            f.ANGLE_MODE = 0;   // failsafe support
-            f.FW_FAILSAFE_RTH_ENABLE = 0;
-        }
-
-        if (rcOptions[BOXHORIZON]) {
-            f.ANGLE_MODE = 0;
-            if (!f.HORIZON_MODE) {
-                errorAngleI[ROLL] = 0;
-                errorAngleI[PITCH] = 0;
-                f.HORIZON_MODE = 1;
-            }
-        } else {
-            f.HORIZON_MODE = 0;
-        }
-
-        if ((rcOptions[BOXARM]) == 0)
-            f.OK_TO_ARM = 1;
-        if (f.ANGLE_MODE || f.HORIZON_MODE) {
-            LED1_ON;
-        } else {
-            LED1_OFF;
-        }
-
-#ifdef BARO
-        if (sensors(SENSOR_BARO)) {
-            // Baro alt hold activate
-            if (rcOptions[BOXBARO]) {
-                if (!f.BARO_MODE) {
-                    f.BARO_MODE = 1;
-                    AltHold = EstAlt;
-                    initialThrottleHold = rcCommand[THROTTLE];
-                    errorVelocityI = 0;
-                    BaroPID = 0;
-                }
-            } else {
-                f.BARO_MODE = 0;
-            }
-            // Vario signalling activate
-            if (feature(FEATURE_VARIO)) {
-                if (rcOptions[BOXVARIO]) {
-                    if (!f.VARIO_MODE) {
-                        f.VARIO_MODE = 1;
-                    }
-                } else {
-                    f.VARIO_MODE = 0;
-                }
-            }
-        }
-#endif
-
-#ifdef  MAG
-        if (sensors(SENSOR_ACC) || sensors(SENSOR_MAG)) {
-            if (rcOptions[BOXMAG]) {
-                if (!f.MAG_MODE) {
-                    f.MAG_MODE = 1;
-                    magHold = heading;
-                }
-            } else {
-                f.MAG_MODE = 0;
-            }
-            if (rcOptions[BOXHEADFREE]) {
-                if (!f.HEADFREE_MODE) {
-                    f.HEADFREE_MODE = 1;
-                }
-            } else {
-                f.HEADFREE_MODE = 0;
-            }
-            if (rcOptions[BOXHEADADJ]) {
-                headFreeModeHold = heading; // acquire new heading
-            }
-        }
-#endif
-
+						
+        if(auxState == 20)
+				{
+					  mwArm();
+                      mode1 = true;
+					  mode2 = false;
+					  landing = false;
+				}
+				else if (auxState == 12)
+					  {
+                        mode1 = false;
+					    mode2 = false;
+                        landing = true;
+                      }
+				else if (auxState == 36)
+					 {
+                        mode1 = false;
+					    mode2 = true;
+                        landing = false;
+                     } 
+				else if (auxState == 17 || auxState == 33 || auxState == 9)
+					  mwDisarm();
+    
 #ifdef GPS
         if (sensors(SENSOR_GPS)) {
             if (f.GPS_FIX && GPS_numSat >= 5) {
-                if (nav_mode != NAV_MODE_NONE && (!f.HORIZON_MODE && !f.ANGLE_MODE))
-                    f.ANGLE_MODE = true; // Force a stable mode in GPS Mode
-
                 // if both GPS_HOME & GPS_HOLD are checked => GPS_HOME is the priority
                 if (rcOptions[BOXGPSHOME] || f.FW_FAILSAFE_RTH_ENABLE ) {
                     if (!f.GPS_HOME_MODE) {
@@ -858,157 +541,57 @@ void loop(void)
         }
 #endif
 
-        if (rcOptions[BOXPASSTHRU] && !f.FW_FAILSAFE_RTH_ENABLE) {
-            f.PASSTHRU_MODE = 1;
-        } else {
-            f.PASSTHRU_MODE = 0;
-        }
-
-        if (f.FIXED_WING) {
-            f.HEADFREE_MODE = 0;
-            if (feature(FEATURE_FAILSAFE) && failsafeCnt > (6 * cfg.failsafe_delay)) {
-                f.PASSTHRU_MODE = 0;
-                f.ANGLE_MODE = 1;
-                for (i = 0; i < 3; i++)
-                    rcData[i] = mcfg.midrc;
-                rcData[THROTTLE] = cfg.failsafe_throttle;
-                // No GPS?  Force a soft left turn.
-                if (!f.GPS_FIX && GPS_numSat <= 5) {
-                    f.FW_FAILSAFE_RTH_ENABLE = 0;
-                    rcData[ROLL] = mcfg.midrc - 50;
-                }
-            }
-        }
-        // When armed and motors aren't spinning. Make warning beeps so that accidentally won't lose fingers...
-        // Also disarm board after 5 sec so users without buzzer won't lose fingers.
-        if (feature(FEATURE_MOTOR_STOP) && f.ARMED && !f.FIXED_WING) {
-            if (isThrottleLow) {
-                if (disarmTime == 0)
-                    disarmTime = millis() + 1000 * mcfg.auto_disarm_board;
-                else if (disarmTime < millis() && mcfg.auto_disarm_board != 0)
-                    mwDisarm();
-                buzzer(BUZZER_ARMED);
-            } else if (disarmTime != 0)
-                disarmTime = 0;
-        }
-    } else {                        // not in rc loop
+    }
+    else{                        // not in rc loop
         static int taskOrder = 0;   // never call all function in the same loop, to avoid high delay spikes
+        taskOrdercheck = taskOrder;
+
         switch (taskOrder) {
-            case 0:
-                taskOrder++;
-#ifdef MAG
-                if (sensors(SENSOR_MAG) && Mag_getADC())
-                    break;
-#endif
-            case 1:
-                taskOrder++;
-#ifdef BARO
-                if (sensors(SENSOR_BARO) && Baro_update())
-                    break;
-#endif
-            case 2:
-                taskOrder++;
-#ifdef BARO
-                if (sensors(SENSOR_BARO) && getEstimatedAltitude())
-                    break;
-#endif
-            case 3:
-                // if GPS feature is enabled, gpsThread() will be called at some intervals to check for stuck
-                // hardware, wrong baud rates, init GPS if needed, etc. Don't use SENSOR_GPS here as gpsThread() can and will
-                // change this based on available hardware
-                taskOrder++;
-#ifdef GPS
-                if (feature(FEATURE_GPS)) {
-                    gpsThread();
-                    break;
-                }
-#endif
-            case 4:
-                taskOrder = 0;
-#ifdef SONAR
-                if (sensors(SENSOR_SONAR)) {
-                    Sonar_update();
-                }
-#endif
-                if (feature(FEATURE_VARIO) && f.VARIO_MODE)
-                    mwVario();
+        case 0:
+            taskOrder++;
+            if (sensors(SENSOR_MAG) && Mag_getADC())
                 break;
+        case 1:
+            taskOrder++;
+            if (sensors(SENSOR_BARO) && Baro_update())
+                break;
+        case 2:
+            taskOrder++;
+            if (sensors(SENSOR_BARO) && getEstimatedAltitude())
+                break;
+        
+        case 3:
+            taskOrder++;
+
+//!!!!!!!!!!!!!!         DO NOT UNCOMMENT IF YOU ARE USING WIFI        !!!!!!!!!!!!!//
+// if GPS feature is enabled, gpsThread() will be called at some intervals to check for stuck
+// hardware, wrong baud rates, init GPS if needed, etc. Don't use SENSOR_GPS here as gpsThread() can and will
+// change this based on available hardware
+/*#ifdef GPS
+            if (feature(FEATURE_GPS)) {
+                gpsThread();
+                break;
+                }
+#endif*/
+
+        case 4:
+            taskOrder = 0;
         }
     }
-
     currentTime = micros();
-    if (mcfg.looptime == 0 || (int32_t)(currentTime - loopTime) >= 0) {
+    if(mcfg.looptime == 0 || (int32_t)(currentTime - loopTime) >= 0){
         loopTime = currentTime + mcfg.looptime;
 
         computeIMU();
+        imuUpdateAttitude(currentTime);   // 20220913 add quaternion calculate   
+        use_quaternion_angle();   // 20220913 add quaternion calculate
+
         // Measure loop rate just afer reading the sensors
         currentTime = micros();
         cycleTime = (int32_t)(currentTime - previousTime);
         previousTime = currentTime;
         // non IMU critical, temeperatur, serialcom
         annexCode();
-#ifdef MAG
-        if (sensors(SENSOR_MAG)) {
-            if (abs(rcCommand[YAW]) < 70 && f.MAG_MODE) {
-                int16_t dif = heading - magHold;
-                if (dif <= -180)
-                    dif += 360;
-                if (dif >= +180)
-                    dif -= 360;
-                dif *= -mcfg.yaw_control_direction;
-                if (f.SMALL_ANGLE)
-                    rcCommand[YAW] -= dif * cfg.P8[PIDMAG] / 30;    // 18 deg
-            } else
-                magHold = heading;
-        }
-#endif
-
-#ifdef BARO
-        if (sensors(SENSOR_BARO)) {
-            if (f.BARO_MODE) {
-                static uint8_t isAltHoldChanged = 0;
-                if (!f.FIXED_WING) {
-                    // multirotor alt hold
-                    if (cfg.alt_hold_fast_change) {
-                        // rapid alt changes
-                        if (abs(rcCommand[THROTTLE] - initialThrottleHold) > cfg.alt_hold_throttle_neutral) {
-                            errorVelocityI = 0;
-                            isAltHoldChanged = 1;
-                            rcCommand[THROTTLE] += (rcCommand[THROTTLE] > initialThrottleHold) ? -cfg.alt_hold_throttle_neutral : cfg.alt_hold_throttle_neutral;
-                        } else {
-                            if (isAltHoldChanged) {
-                                AltHold = EstAlt;
-                                isAltHoldChanged = 0;
-                            }
-                            rcCommand[THROTTLE] = constrain(initialThrottleHold + BaroPID, mcfg.minthrottle, mcfg.maxthrottle);
-                        }
-                    } else {
-                        // slow alt changes for apfags
-                        if (abs(rcCommand[THROTTLE] - initialThrottleHold) > cfg.alt_hold_throttle_neutral) {
-                            // set velocity proportional to stick movement +100 throttle gives ~ +50 cm/s
-                            setVelocity = (rcCommand[THROTTLE] - initialThrottleHold) / 2;
-                            velocityControl = 1;
-                            isAltHoldChanged = 1;
-                        } else if (isAltHoldChanged) {
-                            AltHold = EstAlt;
-                            velocityControl = 0;
-                            isAltHoldChanged = 0;
-                        }
-                        rcCommand[THROTTLE] = constrain(initialThrottleHold + BaroPID, mcfg.minthrottle, mcfg.maxthrottle);
-                    }
-                } else {
-                    // handle fixedwing-related althold. UNTESTED! and probably wrong
-                    // most likely need to check changes on pitch channel and 'reset' althold similar to
-                    // how throttle does it on multirotor
-                    rcCommand[PITCH] += BaroPID * mcfg.fw_althold_dir;
-                }
-            }
-        }
-#endif
-
-        if (cfg.throttle_correction_value && (f.ANGLE_MODE || f.HORIZON_MODE)) {
-            rcCommand[THROTTLE] += throttleAngleCorrection;
-        }
 
 #ifdef GPS
         if (sensors(SENSOR_GPS)) {
@@ -1034,11 +617,375 @@ void loop(void)
         }
 #endif
 
-        // PID - note this is function pointer set by setPIDController()
-        pid_controller();
+			if( count<= 1500){  //when armed and initialthrottle == 0, wait for 'annexCode' Function to enable initialThrottle
+                motor[0] = 1100;
+                motor[1] = 1100;
+                servo[3] = 1500;
+                servo[4] = 1500;
+                LED0_TOGGLE;
+            }
+            
+            // align optitrack coordinate to earth   
+            rigidbody_x = (float)tmp_px / 100.0f;   //cm to m	
+            rigidbody_y = (float)tmp_py / 100.0f;
+            rigidbody_z = (float)tmp_pz / 100.0f;	
+            align_MOCAP_coordinat_to_earth_coordinate(&rigidbody_x,&rigidbody_y);    
 
-        mixTable();
+			if( f.ARMED && initialThrottle == 1 ) {	
+                //store position xyz before fly
+                if(org_init){
+                //original_x = rigidbody_x; //may be useful in the future
+                //original_y = rigidbody_y; //may be useful in the future
+                original_z = rigidbody_z;
+                OX = tmp_px;
+                OY = tmp_py;
+                OZ = tmp_pz;
+                org_init = false;
+                } 
+
+				if(flag == 0){	
+                    flag = 1;
+                    m1_count_store = count;
+                    store_alt = EstAlt;     //store initial ALT from acc and baro
+                    rcCommand[ROLL] = 0;
+                    rcCommand[PITCH] = 0;
+                    rcCommand[YAW] = 0;   
+                    rcCommand[THROTTLE] = 0;                             
+                }
+
+                if(mode1){
+                    flight_task = 1; //hover 
+                    ref_roll_angle = 0;
+                    ref_pitch_angle = -90;  //hover
+                    ref_yaw_angle = -magHold;
+                    px_ref = (float)OX/100.0f + 0.0f;    //set desired x (MOCAP coordinate)
+                    py_ref = (float)OY/100.0f + 0.0f;     //set desired y (MOCAP coordinate)
+                    pz_ref = 0.6f;    //set desired height (MOCAP coordinate)
+                    bvx_ref = 0.0f;   //body_x velocity ref
+
+                    static uint32_t pT;
+                    uint32_t cT = micros();
+                    uint32_t dT;
+                    dT = cT - pT;
+
+                    if(mode1_trigger == 1){ //when switch back to mode1
+                        m1_count_store = count;
+                        magHold = lrintf( (float)quaternionyaw/10.0f ); //reset maghold when we change back to mode1 from mode2
+                        mode1_trigger = false;
+                        mode2_trigger = true;
+                        mode3_trigger = true;
+                    }
+
+//*********** trajectory and position_controller at 20hz, attitude_controller at 200hz **************//     
+//dont use these lines of code if you want to tune attitude only(quaternion_desired = quaternion_current when you armed!)
+#ifndef ATTITUDE_TUNING
+                    if (dT < 50000){    //50000 microsecends means 20HZ
+                        //pass
+                    }
+                    else{                        
+                        pT = cT;
+                        float x_error,y_error,z_error;
+
+//========= trajectory generate: =========//
+                        voltage_manergor(&flight_task, vbat);
+                        trajectory_generator(flight_task);    // 1:hover, , it will update px_ref....ref_roll_angle...etc for controllers
+
+
+//========= position controller: =========//
+                        align_MOCAP_coordinat_to_earth_coordinate(&px_ref,&py_ref);
+                        x_error = x_PID_controller(px_ref);
+                        y_error = y_PID_controller(py_ref);
+                        z_error = z_PID_controller(pz_ref);  
+
+                        imuComputeQuaternionFromRPY(ref_roll_angle, ref_pitch_angle, ref_yaw_angle, &quaternion_ref);   //update quaternion_ref, input(degree)
+    #ifdef POSITION_TUNING                       
+                        quaternion_ref.w = quat_hold.w;
+                        quaternion_ref.x = quat_hold.x;
+                        quaternion_ref.y = quat_hold.y;
+                        quaternion_ref.z = quat_hold.z;
+                        px_ref = 0.0f;
+                        py_ref = 0.0f;
+                        pz_ref = 0.0f;
+                        magHold = 270;  // NEED TO CHOOSE YOUR OWN magHold(flapping wing facing) ,since every setup was different!
+                        align_MOCAP_coordinat_to_earth_coordinate(&px_ref,&py_ref);
+                        x_error = x_PID_controller(px_ref);
+                        y_error = y_PID_controller(py_ref);
+                        z_error = z_PID_controller(pz_ref);
+    #endif
+                        quaternion_ref_to_RotationMatrix(&quaternion_ref);      //update rotation matrix of quaternion_ref(qMat)
+                        position_controller(x_error, y_error, z_error);      //input euler_angle_ref and position_ref, output quaternion_desired
+                        cal_body_velocity(cT);
+                        thrust_cmd = thrust_controller(bvx_ref, pz_ref);
+                    }
+#endif
+
+//========= attitude controller: =========//
+#ifdef FLY_BY_ATTITUDE_CONTROL
+                    imuComputeQuaternionFromRPY(ref_roll_angle, ref_pitch_angle, ref_yaw_angle, &desired_quaternion);
+#endif
+
+                    calculate_quaternion_error();   //input quaternion_desired , output quaternion_error      
+                    roll_cmd = roll_quaternion_controller();
+                    pitch_cmd = pitch_quaternion_controller();
+                    yaw_cmd = yaw_quaternion_controller();
+                    thrust_cmd = z_baro_PID_controller(60); //input cm
+                    bounding(&thrust_cmd ,1900,1350);                		               
+                    motor[0] = thrust_cmd - yaw_cmd;
+                    motor[1] = thrust_cmd + yaw_cmd;
+                    servo[3] = 1500 - roll_cmd - pitch_cmd;
+                    servo[4] = 1500 - roll_cmd + pitch_cmd;
+                    auxState_log = 1;   //for blackbox 
+
+#ifdef ATTITUDE_TUNING
+                    //motor[0] = rcData[0];
+                    //motor[1] = rcData[0];
+                    //servo[3] = 1500;
+                    //servo[4] = 1500;
+
+                    motor[0] = 1650;
+                    motor[1] = 1650;
+                    servo[3] = 1500 - roll_cmd;
+                    servo[4] = 1500 - roll_cmd;
+
+                    //motor[0] = 1650;
+                    //motor[1] = 1650;
+                    //servo[3] = 1500 - pitch_cmd;
+                    //servo[4] = 1500 + pitch_cmd;
+
+                    //motor[0] = 1650 - yaw_cmd;
+                    //motor[1] = 1650 + yaw_cmd;
+                    //servo[3] = 1500;
+                    //servo[4] = 1500;  
+#endif
+                    //thrsut_curve_n_point(5, 600, 1950, 1150, m1_count_store);      // use this function if you want to get thrust curve, remember to comment "voltage manager"!!!!!!                   
+                }
+            }
+			else
+			{
+					flag = 0;
+			}               
+
+                if(mode2){  //horiztal mode
+                    static uint32_t pT_2;
+                    uint32_t cT = micros();
+                    uint32_t dT;
+                    dT = cT - pT_2;
+
+                    if(mode2_trigger == 1){ //when switch to mode2
+                        m2_count_store = count;
+                        //magHold = lrintf(quaternionyaw/10); //reset maghold when we change back to mode2 from mode1
+                        mode1_trigger = true;
+                        mode2_trigger = false;
+                        mode3_trigger = true;
+                        flight_task = 2;    //start fly foreward
+                    }
+
+//*********** trajectory and position_controller at 20hz, attitude_controller at 200hz **************//      
+//dont use these lines of code if you want to tune attitude only(quaternion_desired = quaternion_current when you armed!)
+#ifndef ATTITUDE_TUNING
+                    if (dT < 50000){    //50000 microsecends means 20HZ
+                        //pass
+                    }
+                    else{         
+                        pT_2 = cT;
+                        float x_error,y_error,z_error;
+
+//========= trajectory generate: =========// 
+//it will update px_ref....ref_roll_angle...etc for controllers
+
+                        if( ( quaternionpitch > (-500) ) && ( (count-m2_count_store)>200 ) ){    //if we near level fly aoa, start to bankturn
+                            bankturn_task = true;
+                        }
+                        if(bankturn_task){
+                            flight_task = 3;    // 3:left bankturn after level flight                     
+                        }
+
+                        voltage_manergor(&flight_task, vbat);
+                        trajectory_generator(flight_task);
+
+//========= position controller: =========//
+                        align_MOCAP_coordinat_to_earth_coordinate(&px_ref,&py_ref); // transfer px_ref and py_ref to earth coordinate
+                        x_error = x_PID_controller(px_ref);
+                        y_error = y_PID_controller(py_ref);
+                        z_error = z_PID_controller(pz_ref);  
+
+                        imuComputeQuaternionFromRPY(ref_roll_angle, ref_pitch_angle, ref_yaw_angle, &quaternion_ref);       //update quaternion_ref, input(degree)
+    #ifdef POSITION_TUNING                       
+                        quaternion_ref.w = quat_hold.w;
+                        quaternion_ref.x = quat_hold.x;
+                        quaternion_ref.y = quat_hold.y;
+                        quaternion_ref.z = quat_hold.z;
+                        px_ref = 0.0f;
+                        py_ref = 0.0f;
+                        pz_ref = 0.0f;
+                        magHold = 270;  // NEED TO CHOOSE YOUR OWN magHold(flapping wing facing) ,since every setup was different!
+                        align_MOCAP_coordinat_to_earth_coordinate(&px_ref,&py_ref);
+                        x_error = x_PID_controller(px_ref);
+                        y_error = y_PID_controller(py_ref);
+                        z_error = z_PID_controller(pz_ref);
+    #endif
+                        quaternion_ref_to_RotationMatrix(&quaternion_ref);      //update rotation matrix of quaternion_ref(qMat)
+                        position_controller(x_error, y_error, z_error);      //input euler_angle_ref and position_ref, output quaternion_desired
+                        cal_body_velocity(cT);
+
+//========= thrust controller: =========//
+                        thrust_cmd = thrust_controller(bvx_ref, pz_ref);
+                    }
+#endif
+
+
+//========= attitude controller: =========//
+#ifdef FLY_BY_ATTITUDE_CONTROL
+                    imuComputeQuaternionFromRPY(ref_roll_angle, ref_pitch_angle, ref_yaw_angle, &desired_quaternion);
+#endif
+
+                    calculate_quaternion_error();   //input quaternion_desired , output quaternion_error      
+                    roll_cmd = roll_quaternion_controller();
+                    pitch_cmd = pitch_quaternion_controller();
+                    yaw_cmd = yaw_quaternion_controller();
+                    thrust_cmd = z_baro_PID_controller(60); //input cm
+                    bounding(&thrust_cmd ,1900,1350);     
+
+                    motor[0] = thrust_cmd - yaw_cmd;
+                    motor[1] = thrust_cmd + yaw_cmd;
+                    servo[3] = 1500 - roll_cmd - pitch_cmd;
+                    servo[4] = 1500 - roll_cmd + pitch_cmd;
+
+                    auxState_log = 2;   //for blackbox
+                }
+
+				if ( landing ){     //manual landing
+                    static uint32_t pT_3;
+                    uint32_t cT = micros();
+                    uint32_t dT;
+                    dT = cT - pT_3;
+
+                    if(mode3_trigger == 1){ //when switch to mode3(landing)
+                        m3_count_store = count;
+                        mode1_trigger = true;
+                        mode2_trigger = true;
+                        mode3_trigger = false;
+                        ref_roll_angle = 0;
+                        ref_pitch_angle = -90;  //hover
+                        ref_yaw_angle = -magHold;   //reset maghold when we change back to landing from mode1
+                        px_ref = last_x;    //set desired x
+                        py_ref = last_y;    //set desired y
+                        pz_ref = 0.6f;    //set desired height
+                        bvx_ref = 0.0f;   //body_x velocity ref
+                    }
+
+                    pz_ref = pz_ref - 0.0005f;   //decrease desired altitude(200hz)
+                    if(pz_ref<0.1){
+                        pz_ref = 0.1f;
+                    }
+
+//*********** trajectory and position_controller at 20hz, attitude_controller at 200hz **************//                
+//dont use these lines of code if you want to tune attitude only(quaternion_desired = quaternion_current when you armed!)
+//dont need voltage manegor and trajectory generator since we already start landing
+#ifndef ATTITUDE_TUNING
+                    if (dT < 50000){    //50000 microsecends means 20HZ
+                        //pass
+                    }
+                    else{                        
+                        pT_3 = cT;
+                        float x_error,y_error,z_error;
+
+//========= position controller: =========//   
+                        align_MOCAP_coordinat_to_earth_coordinate(&px_ref,&py_ref);
+                        x_error = x_PID_controller(px_ref);
+                        y_error = y_PID_controller(py_ref);
+                        z_error = z_PID_controller(pz_ref);  
+
+                        imuComputeQuaternionFromRPY(ref_roll_angle, ref_pitch_angle, ref_yaw_angle, &quaternion_ref);       //update quaternion_ref, input(degree)
+                        quaternion_ref_to_RotationMatrix(&quaternion_ref);      //update rotation matrix of quaternion_ref(qMat)
+                        position_controller(x_error, y_error, z_error);      //input euler_angle_ref and position_ref, output quaternion_desired
+                        cal_body_velocity(cT);
+
+//========= thrust controller: =========//
+                        thrust_cmd = thrust_controller(bvx_ref, pz_ref);
+                    }
+#endif
+
+//========= attitude controller: =========//
+#ifdef FLY_BY_ATTITUDE_CONTROL
+                    imuComputeQuaternionFromRPY(ref_roll_angle, ref_pitch_angle, ref_yaw_angle, &desired_quaternion);
+#endif
+
+                    calculate_quaternion_error();   //input quaternion_desired , output quaternion_error      
+                    roll_cmd = roll_quaternion_controller();
+                    pitch_cmd = pitch_quaternion_controller();
+                    yaw_cmd = yaw_quaternion_controller();
+                    thrust_cmd = z_baro_PID_controller( lrintf(pz_ref*100.0f) ); //input cm
+                    bounding(&thrust_cmd ,1900,1350);                		               
+                    motor[0] = thrust_cmd - yaw_cmd;
+                    motor[1] = thrust_cmd + yaw_cmd;
+                    servo[3] = 1500 - roll_cmd - pitch_cmd;
+                    servo[4] = 1500 - roll_cmd + pitch_cmd;
+                    auxState_log = 3;   //for blackbox
+                    
+                    if( (tmp_pz-OZ) < 20){   //close enought to the ground, then stop 
+                        stop = true;
+                    }
+				}
+
+				if ( stop ) {
+					  motor[0] = 1100;
+                      motor[1] = 1100;
+					  servo[3] = 1500;
+		  			  servo[4] = 1500;
+					  //servo[5] = 1500;
+				}
+
+        last_x = (float)tmp_px/100.0f;    //store last position for swiching different flight modes
+        last_y = (float)tmp_py/100.0f;
+
+        bounding(&motor[0], 1850, 1100);        //saturate pwm output, max:1950 but it will damage flapping wing
+        bounding(&motor[1], 1850, 1100);
+        bounding(&servo[3], 2300, 700);
+        bounding(&servo[4], 2300, 700);
+
+		store_pwm[0] = motor[0];
+        store_pwm[1] = motor[1];
+		store_pwm[2] = servo[3];
+		store_pwm[3] = servo[4];
+		count++;
+
         writeServos();
         writeMotors();
-    }
+
+#ifdef BLACKBOX
+        handleBlackbox();   //200hz
+#endif
+
+    //printf("qr = %d ",quaternionroll);
+    //printf("qp = %d ",quaternionpitch);
+    //printf("qy = %d ",quaternionyaw);
+    //printf("   \r\n"); 
+    //printf("qw = %d ",lrintf(1000*q.w));
+    //printf("qx = %d ",lrintf(1000*q.x));
+    //printf("qy = %d ",lrintf(1000*q.y));
+    //printf("qz = %d ",lrintf(1000*q.z));
+    //printf("   \r\n");    
+    //printf("rr = %d ",ref_roll_angle);
+    //printf("rp = %d ",ref_pitch_angle);
+    //printf("rp = %d ",ref_yaw_angle);
+    //printf("   \r\n");
+
+	} 
+     
+#ifdef WIFI 
+    //get optitrack data(x,y,z) by wifi
+    getwifidata();
+    update_wifidata();  //40hz update rate
+    wifi_ledblink();
+#endif
+
+    //printf("x = %d ",wifidata_x);
+    //printf("y = %d ",wifidata_y);
+    //printf("z = %d ",wifidata_z);
+    //printf("px = %d ",tmp_px);
+    //printf("py = %d ",tmp_py);
+    //printf("pz = %d ",tmp_pz);
+    //printf("loop = %d ",wifiloop);
+    //printf("   \r\n");         
 }

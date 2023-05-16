@@ -3,9 +3,10 @@
  * Licensed under GPL V3 or modified DCL - see https://github.com/multiwii/baseflight/blob/master/README.md
  */
 #pragma once
-
 // for roundf()
 #define __USE_C99_MATH
+
+#define BLACKBOX
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -48,8 +49,7 @@
 typedef enum HardwareRevision {
     NAZE32 = 1,                                         // Naze32 and compatible with 8MHz HSE
     NAZE32_REV5,                                        // Naze32 and compatible with 12MHz HSE
-    NAZE32_SP,                                          // Naze32 w/Sensor Platforms
-    NAZE32_REV6,                                        // Naze32 rev6
+    NAZE32_SP                                           // Naze32 w/Sensor Platforms
 } HardwareRevision;
 
 typedef enum {
@@ -97,8 +97,7 @@ typedef enum {
     FEATURE_VARIO = 1 << 13,
     FEATURE_3D = 1 << 14,
     FEATURE_FW_FAILSAFE_RTH = 1 << 15,
-    FEATURE_SYNCPWM = 1 << 16,
-    FEATURE_FASTPWM = 1 << 17,
+    FEATURE_BLACKBOX = 1 << 16
 } AvailableFeatures;
 
 typedef enum {
@@ -107,8 +106,7 @@ typedef enum {
     SERIALRX_SBUS = 2,
     SERIALRX_SUMD = 3,
     SERIALRX_MSP = 4,
-    SERIALRX_IBUS = 5,
-    SERIALRX_PROVIDER_MAX = SERIALRX_IBUS,
+    SERIALRX_PROVIDER_MAX = SERIALRX_MSP,
 } SerialRXType;
 
 typedef enum {
@@ -220,16 +218,15 @@ typedef struct baro_t {
 #define ACC
 #define MAG
 #define BARO
-#define GPS
-#define LEDRING
-#define SONAR
 #define BUZZER
 #define LED0
 #define LED1
 #define INVERTER
 #define MOTOR_PWM_RATE 400
+#define BLACKBOX
+#define GPS  //20220907
 
-#define SENSORS_SET (SENSOR_ACC | SENSOR_BARO | SENSOR_MAG)
+#define SENSORS_SET (SENSOR_ACC | SENSOR_BARO | SENSOR_MAG | SENSOR_GPS)  //20220907
 #define I2C_DEVICE (I2CDEV_2)
 
 // #define PROD_DEBUG
@@ -237,12 +234,11 @@ typedef struct baro_t {
 // #define SOFT_I2C_PB1011          // If SOFT_I2C is enabled above, need to define pinout as well (I2C1 = PB67, I2C2 = PB1011)
 // #define SOFT_I2C_PB67
 
-// AfroFlight32
+ // AfroFlight32
 #include "drv_adc.h"
 #include "drv_adxl345.h"
 #include "drv_bma280.h"
 #include "drv_bmp085.h"
-#include "drv_bmp280.h"
 #include "drv_ms5611.h"
 #include "drv_hmc5883l.h"
 #include "drv_ak8975.h"
@@ -250,7 +246,9 @@ typedef struct baro_t {
 #include "drv_spi.h"
 #include "drv_ledring.h"
 #include "drv_mma845x.h"
-#include "drv_mpu.h"
+#include "drv_mpu3050.h"
+#include "drv_mpu6050.h"
+#include "drv_mpu6500.h"
 #include "drv_l3g4200d.h"
 #include "drv_pwm.h"
 #include "drv_timer.h"
@@ -258,6 +256,7 @@ typedef struct baro_t {
 #include "drv_uart.h"
 #include "drv_softserial.h"
 #include "drv_hcsr04.h"
+
 
 #elif defined(CJMCU)
 // CJMCU brushed quad pcb
@@ -283,8 +282,7 @@ typedef struct baro_t {
 #include "drv_adc.h"
 #include "drv_hmc5883l.h"
 #include "drv_i2c.h"
-#include "drv_spi.h"
-#include "drv_mpu.h"
+#include "drv_mpu6050.h"
 #include "drv_pwm.h"
 #include "drv_timer.h"
 #include "drv_serial.h"
@@ -293,6 +291,12 @@ typedef struct baro_t {
 #else
 #error TARGET NOT DEFINED!
 #endif /* all conditions */
+
+// Blackbox define printf
+#ifdef BLACKBOX
+#define USE_LAME_PRINTF
+#include "printf.h"
+#endif
 
 // Helpful macros
 #ifdef LED0
@@ -332,3 +336,82 @@ typedef struct baro_t {
 #define INV_OFF                 ;
 #define INV_ON                  ;
 #endif
+
+//-----------20220913 add quaternion start--------//
+#define DEGREES_TO_RADIANS(angle) ((angle) * 0.0174532925f)//add on 20230103
+#define RADIANS_TO_DEGREES(rad) ((rad) / 3.14159265358979323846f * 180.0f)//add on 20230103
+
+typedef uint32_t timeUs_t;
+typedef int32_t timeDelta_t;
+
+#define XYZ_AXIS_COUNT 3
+
+typedef struct mag_s {
+    float magADC[XYZ_AXIS_COUNT];
+    float magneticDeclination;
+} mag_t;
+
+// Floating point 3 vector.
+typedef struct fp_vector {
+    float X;
+    float Y;
+    float Z;
+} t_fp_vector_def;
+
+typedef union u_fp_vector {
+    float A[3];
+    t_fp_vector_def V;
+} t_fp_vector;
+
+typedef struct {
+    float w,x,y,z;
+} quaternion;
+
+#define QUATERNION_INITIALIZE  {.w=1, .x=0, .y=0,.z=0}
+
+typedef struct {
+    float ww,wx,wy,wz,xx,xy,xz,yy,yz,zz;
+} quaternionProducts;
+#define QUATERNION_PRODUCTS_INITIALIZE  {.ww=1, .wx=0, .wy=0, .wz=0, .xx=0, .xy=0, .xz=0, .yy=0, .yz=0, .zz=0}
+
+typedef union {
+    int16_t raw[XYZ_AXIS_COUNT];
+    struct {
+        // absolute angle inclination in multiple of 0.1 degree    180 deg = 1800
+        int16_t roll;
+        int16_t pitch;
+        int16_t yaw;
+    } values;
+} attitudeEulerAngles_t;
+#define EULER_INITIALIZE  { { 0, 0, 0 } }
+
+extern attitudeEulerAngles_t attitude;
+
+typedef struct accDeadband_s {
+    uint8_t xy;                 // set the acc deadband for xy-Axis
+    uint8_t z;                  // set the acc deadband for z-Axis, this ignores small accelerations
+} accDeadband_t;
+
+void getQuaternion(quaternion * q);
+
+bool imuQuaternionHeadfreeOffsetSet(void);
+void imuQuaternionHeadfreeTransformVectorEarthToBody(t_fp_vector_def * v);
+void imuComputeQuaternionFromRPY(int16_t initialRoll, int16_t initialPitch, int16_t initialYaw , quaternion *des_q);
+
+typedef struct imuRuntimeConfig_s {
+    float dcm_ki;
+    float dcm_kp;
+    uint8_t acc_unarmedcal;
+    uint8_t small_angle;
+    accDeadband_t accDeadband;
+} imuRuntimeConfig_t;
+
+typedef enum {
+    ARMED                       = (1 << 0),
+    WAS_EVER_ARMED              = (1 << 1),
+    WAS_ARMED_WITH_PREARM       = (1 << 2)
+} armingFlag_e;
+
+
+//-----------20220913 add quaternion end--------//
+

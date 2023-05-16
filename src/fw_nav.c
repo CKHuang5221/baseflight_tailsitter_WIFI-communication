@@ -1,24 +1,20 @@
 #include "board.h"
 #include "mw.h"
-
+#define GPS
 // from gps.c
 extern int32_t nav_bearing;
 extern int32_t wp_distance;
-extern int32_t GPS_WP[2];
-extern float GPS_scaleLonDown;
-
 extern PID_PARAM navPID_PARAM;
 extern PID_PARAM altPID_PARAM;
 
 #define GPS_UPD_HZ 5            // Set loop time for NavUpdate 5 Hz is enough
 #define PITCH_COMP 0.5f         // Compensate throttle relative angle of attack
 // Candidates for CLI
-#define SAFE_NAV_ALT 25         // Safe Altitude during climbouts Wings Level below this Alt. (ex. trees & buildings..)
+#define SAFE_NAV_ALT 20         // Safe Altitude during climbouts Wings Level below this Alt. (ex. trees & buildings..)
 #define SAFE_DECSCEND_ZONE 50   // Radius around home where descending is OK
 // For speedBoost
 #define GPS_MINSPEED 500        // 500= ~18km/h
 #define I_TERM 0.1f
-#define GEO_SKALEFACT  89.832f  // Scale to match meters  
 
 float navErrorI;
 float altErrorI;
@@ -44,25 +40,12 @@ void fw_nav_reset(void)
     }
 }
 
-void fw_FlyTo(void) // PatrikE CruiseMode version
-{
-    float wp_lat_diff, wp_lon_diff, scaler;
-    int32_t holdHeading = GPS_ground_course / 10;
-    if (holdHeading > 180)
-        holdHeading -= 360;
-    scaler = (GEO_SKALEFACT / GPS_scaleLonDown) * cfg.fw_cruise_distance;
-    wp_lat_diff = cos(holdHeading * 0.0174532925f);
-    wp_lon_diff = sin(holdHeading * 0.0174532925f) * GPS_scaleLonDown;
-    GPS_WP[LAT] += wp_lat_diff * scaler;
-    GPS_WP[LON] += wp_lon_diff * scaler;
-}
-
 void fw_nav(void)
 {
     int16_t GPS_Heading = GPS_ground_course;    // Store current bearing
     int16_t Current_Heading;                    // Store current bearing
     int16_t altDiff = 0;
-    uint8_t RTH_Alt = cfg.fw_rth_alt;           // Min Altitude to keep during RTH. (Max 200m)
+    int16_t RTH_Alt = cfg.D8[PIDPOSR];          // conf.pid[PIDALT].D8;
     int16_t delta[2] = { 0, 0 };                // D-Term
     static int16_t NAV_deltaSum, ALT_deltaSum, GPS_FwTarget, GPS_AltErr, NAV_Thro;
     int16_t TX_Thro = rcData[THROTTLE];         // Read and store Throttle pos.
@@ -72,7 +55,7 @@ void fw_nav(void)
     int16_t groundSpeed;
     int spDiff;
     uint8_t i;
-
+    
     // Nav timer
     static uint32_t gpsTimer = 0;
     static uint16_t gpsFreq = 1000 / GPS_UPD_HZ;    // 5HZ 200ms DT
@@ -87,7 +70,7 @@ void fw_nav(void)
 
     // Wrap GPS_Heading 1800
     GPS_Heading = wrap_18000(GPS_Heading * 10) / 10;
-
+    
     // Only use MAG if Mag and GPS_Heading aligns
     if (sensors(SENSOR_MAG)) {
         if (abs(heading - (GPS_Heading / 10)) > 10 && GPS_speed > 200)
@@ -110,7 +93,7 @@ void fw_nav(void)
         // Deadpan for throttle at correct Alt.
         if (abs(GPS_AltErr) < 1) // Just cruise along in deadpan.
             NAV_Thro = cfg.fw_cruise_throttle;
-        else
+        else 
             // Add AltitudeError  and scale up with a factor to throttle
             NAV_Thro = constrain(cfg.fw_cruise_throttle - (GPS_AltErr * cfg.fw_scaler_throttle), cfg.fw_idle_throttle, cfg.fw_climb_throttle);
 
@@ -140,12 +123,13 @@ void fw_nav(void)
 
         // Filtering of navDiff around home to stop nervous servos
         if (GPS_distanceToHome < 10)
-            navDiff *= 0.1f;
+            navDiff *= 0.1;
 
         // Wrap Heading 180
         navDiff = wrap_18000(navDiff * 100) / 100;
         if (abs(navDiff) > 170)
             navDiff = 175;      // Forced turn.
+
 
         // PID for Navigating planes.
         navDT = (float) (millis() - nav_loopT) / 1000;
@@ -207,7 +191,7 @@ void fw_nav(void)
 
         navDiff *= navPID_PARAM.kP;                                 // Add P
         navDiff += navErrorI;                                       // Add I
-        // End of NavPID
+        // End of NavPID 
 
         // Limit outputs
         GPS_angle[PITCH] = constrain(altDiff / 10, -cfg.fw_gps_maxclimb * 10, cfg.fw_gps_maxdive * 10) + ALT_deltaSum;
@@ -216,16 +200,16 @@ void fw_nav(void)
 
         // Elevator compensation depending on behaviour.
         // Prevent stall with Disarmed motor
-        if (f.MOTORS_STOPPED)
-            GPS_angle[PITCH] = constrain(GPS_angle[PITCH], -cfg.fw_glide_angle, cfg.fw_gps_maxdive * 10);
+        if (!f.CLIMBOUT_FW)
+            GPS_angle[PITCH] -= (abs(angle[ROLL]) *cfg.fw_roll_comp);
 
         // Add elevator compared with rollAngle
-        if (!f.CLIMBOUT_FW)
-            GPS_angle[PITCH] -= (abs(angle[ROLL]) * (cfg.fw_roll_comp / 100));
+        GPS_angle[PITCH] -= abs(angle[ROLL]);
 
         // Throttle compensation depending on behaviour.
         // Compensate throttle with pitch Angle
         NAV_Thro -= constrain(angle[PITCH] * PITCH_COMP, 0, 450);
+        NAV_Thro = constrain(NAV_Thro, cfg.fw_idle_throttle, cfg.fw_climb_throttle);
 
         // Force the Plane move forward in headwind with speedBoost
         groundSpeed = GPS_speed;
@@ -236,9 +220,6 @@ void fw_nav(void)
 
         speedBoost = constrain(speedBoost, 0, 500);
         NAV_Thro += speedBoost;
-
-        // constrain throttle to Max climb.
-        NAV_Thro = constrain(NAV_Thro, cfg.fw_idle_throttle, cfg.fw_climb_throttle);
     }
     // End of NavTimer
 

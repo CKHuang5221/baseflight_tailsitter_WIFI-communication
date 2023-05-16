@@ -4,11 +4,15 @@
  */
 #include "board.h"
 #include "mw.h"
-
-#include "telemetry_common.h"
-
+//#define BLACKBOX
+#ifdef BLACKBOX
+    #include "blackbox.h"
+#endif
+//#include "telemetry_common.h"
+#define GPS
 core_t core;
 int hw_revision = 0;
+int count = 0;
 
 extern rcReadRawDataPtr rcReadRawFunc;
 
@@ -27,13 +31,22 @@ static void _putc(void *p, char c)
 }
 #else
 // keil/armcc version
-int fputc(int c, FILE *f)
+/*int fputc(int c, FILE *f)
 {
     // let DMA catch up a bit when using set or dump, we're too fast.
     while (!isSerialTransmitBufferEmpty(core.mainport));
     serialWrite(core.mainport, c);
     return c;
+}*/
+
+// this is use to print in putty
+int fputc(int ch, FILE *f)  
+{  
+ USART_SendData(USART1, (uint8_t) ch);  
+ while (USART_GetFlagStatus(USART1, USART_FLAG_TC) == RESET);  
+ return ch;  
 }
+
 #endif
 
 int main(void)
@@ -42,10 +55,6 @@ int main(void)
     drv_pwm_config_t pwm_params;
     drv_adc_config_t adc_params;
     bool sensorsOK = false;
-#ifdef SOFTSERIAL_LOOPBACK
-    serialPort_t *loopbackPort1 = NULL;
-    serialPort_t *loopbackPort2 = NULL;
-#endif
 
     initEEPROM();
     checkFirstTime(false);
@@ -61,6 +70,7 @@ int main(void)
         hw_revision = NAZE32_REV5;
 
     systemInit();
+		
 #ifdef USE_LAME_PRINTF
     init_printf(NULL, _putc);
 #endif
@@ -81,11 +91,6 @@ int main(void)
     delay(100);
 
     activateConfig();
-
-#ifndef CJMCU
-    if (spiInit() == SPI_DEVICE_MPU && hw_revision == NAZE32_REV5)
-        hw_revision = NAZE32_SP;
-#endif
 
     if (hw_revision != NAZE32_SP)
         i2cInit(I2C_DEVICE);
@@ -128,6 +133,7 @@ int main(void)
 
     LED1_ON;
     LED0_OFF;
+		
     for (i = 0; i < 10; i++) {
         LED1_TOGGLE;
         LED0_TOGGLE;
@@ -154,7 +160,7 @@ int main(void)
     pwm_params.usePPM = feature(FEATURE_PPM);
     pwm_params.enableInput = !feature(FEATURE_SERIALRX); // disable inputs if using spektrum
     pwm_params.useServos = core.useServo;
-    pwm_params.extraServos = cfg.gimbal_flags & GIMBAL_FORWARDAUX;
+//    pwm_params.extraServos = cfg.gimbal_flags & GIMBAL_FORWARDAUX;
     pwm_params.motorPwmRate = mcfg.motor_pwm_rate;
     pwm_params.servoPwmRate = mcfg.servo_pwm_rate;
     pwm_params.pwmFilter = mcfg.pwm_filter;
@@ -163,8 +169,6 @@ int main(void)
         pwm_params.idlePulse = mcfg.neutral3d;
     if (pwm_params.motorPwmRate > 500)
         pwm_params.idlePulse = 0; // brushed motors
-    pwm_params.syncPWM = feature(FEATURE_SYNCPWM);
-    pwm_params.fastPWM = feature(FEATURE_FASTPWM);
     pwm_params.servoCenterPulse = mcfg.midrc;
     pwm_params.failsafeThreshold = cfg.failsafe_detect_threshold;
     switch (mcfg.power_adc_channel) {
@@ -186,7 +190,7 @@ int main(void)
     for (i = 0; i < RC_CHANS; i++)
         rcData[i] = 1502;
     rcReadRawFunc = pwmReadRawRC;
-    core.numRCChannels = MAX_PWM_INPUTS;
+    core.numRCChannels = MAX_INPUTS;
 
     if (feature(FEATURE_SERIALRX)) {
         switch (mcfg.serialrx_type) {
@@ -203,75 +207,41 @@ int main(void)
             case SERIALRX_MSP:
                 mspInit(&rcReadRawFunc);
                 break;
-            case SERIALRX_IBUS:
-                ibusInit(&rcReadRawFunc);
-                break;
         }
     }
-#ifndef CJMCU
-    // Optional GPS - available in both PPM, PWM and serialRX input mode, in PWM input, reduces number of available channels by 2.
-    // gpsInit will return if FEATURE_GPS is not enabled.
-    gpsInit(mcfg.gps_baudrate);
+
+//-----------20220904
+gpsInit(mcfg.gps_baudrate);
+//-----------20220904
+
+#ifdef BLACKBOX
+        initBlackbox();
 #endif
 
-    if (feature(FEATURE_PPM)) {
-        core.numRCChannels = MAX_PPM_INPUTS;
-#ifdef SONAR
-        // sonar stuff only works with PPM
-        if (feature(FEATURE_SONAR))
-            Sonar_init();
-#endif
-    }
-
-    core.numAuxChannels = constrain((mcfg.rc_channel_count - 4), 4, 8);
-
-#ifndef CJMCU
-    if (feature(FEATURE_SOFTSERIAL)) {
-        //mcfg.softserial_baudrate = 19200; // Uncomment to override config value
-
-        setupSoftSerialPrimary(mcfg.softserial_baudrate, mcfg.softserial_1_inverted);
-        setupSoftSerialSecondary(mcfg.softserial_2_inverted);
-
-#ifdef SOFTSERIAL_LOOPBACK
-        loopbackPort1 = (serialPort_t *)(&softSerialPorts[0]));
-        serialPrint(loopbackPort1, "SOFTSERIAL 1 - LOOPBACK ENABLED\r\n");
-
-        loopbackPort2 = (serialPort_t *)(&softSerialPorts[1]));
-        serialPrint(loopbackPort2, "SOFTSERIAL 2 - LOOPBACK ENABLED\r\n");
-#endif
-        //core.mainport = (serialPort_t*)&(softSerialPorts[0]); // Uncomment to switch the main port to use softserial.
-    }
-
-    if (feature(FEATURE_TELEMETRY))
-        initTelemetry();
-#endif
-
+#ifdef WIFI
+wifiInit();//20221022
+#endif   
+		
     previousTime = micros();
-    if (mcfg.mixerConfiguration == MULTITYPE_GIMBAL)
+    if (mcfg.mixerConfiguration == MULTITYPE_GIMBAL){
         calibratingA = CALIBRATING_ACC_CYCLES;
-    calibratingG = CALIBRATING_GYRO_CYCLES;
-    calibratingB = CALIBRATING_BARO_CYCLES;             // 10 seconds init_delay + 200 * 25 ms = 15 seconds before ground pressure settles
-    f.SMALL_ANGLE = 1;
+    }
+	//calibratingA = CALIBRATING_ACC_CYCLES;
+    //calibratingG = CALIBRATING_GYRO_CYCLES;
+    //calibratingB = CALIBRATING_BARO_CYCLES;             // 10 seconds init_delay + 200 * 25 ms = 15 seconds before ground pressure settles
 
+//uint32_t currentt;
+//uint32_t duration;
+//uint32_t lasttime; 
+
+sensorsSet(SENSORS_SET);
     // loopy
     while (1) {
-        loop();
-#ifdef SOFTSERIAL_LOOPBACK
-        if (loopbackPort1) {
-            while (serialTotalBytesWaiting(loopbackPort1)) {
-                uint8_t b = serialRead(loopbackPort1);
-                serialWrite(loopbackPort1, b);
-                //serialWrite(core.mainport, 0x01);
-                //serialWrite(core.mainport, b);
-            };
-        }
-
-        if (loopbackPort2) {
-            while (serialTotalBytesWaiting(loopbackPort2)) {
-                serialRead(loopbackPort2);
-            };
-        }
-#endif
+        //currentt = micros();
+        loop();	
+        //duration = currentt - lasttime;
+        //lasttime = currentt;
+        //printf(" d = %d \r\n",duration);
     }
 }
 

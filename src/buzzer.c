@@ -18,11 +18,11 @@
  */
 // fast beep:
 static const uint8_t buzz_shortBeep[] = {
-    5, 5, 0xFF
+    5,5, 0xFF
 };
 // fast beep:
 static const uint8_t buzz_BatteryBeep[] = {
-    10, 5, 0xFF
+    10,5, 0xFF
 };
 // medium beep
 static const uint8_t buzz_mediumBeepFast[] = {
@@ -38,33 +38,33 @@ static const uint8_t buzz_longBeep[] = {
 };
 // SOS morse code:
 static const uint8_t buzz_sos[] = {
-    10, 10, 10, 10, 10, 40, 40, 10, 40, 10, 40, 40, 10, 10, 10, 10, 10, 70, 0xFF
+    10,10, 10,10, 10,40, 40,10, 40,10, 40,40, 10,10, 10,10, 10,70, 0xFF
 };
 // Arming when GPS is fixed
 static const uint8_t buzz_armed[] = {
-    5, 5, 15, 5, 5, 5, 15, 30, 0xFF
+    5,5, 15,5, 5,5, 15,30, 0xFF
 };
 // Ready beeps. When gps has fix and copter is ready to fly.
 static const uint8_t buzz_readyBeep[] = {
-    4, 5, 4, 5, 8, 5, 15, 5, 8, 5, 4, 5, 4, 5, 0xFF
+    4,5, 4,5, 8,5, 15,5, 8,5, 4,5, 4,5, 0xFF
 };
 // 2 fast short beeps
 static const uint8_t buzz_2shortBeeps[] = {
-    5, 5, 5, 5, 0xFF
+    5,5, 5,5, 0xFF
 };
 // 3 fast short beeps
 static const uint8_t buzz_3shortBeeps[] = {
-    5, 5, 5, 5, 5, 5, 0xFF
+    5,5, 5,5, 5,5, 0xFF
 };
 // Array used for beeps when reporting GPS satellite count (up to 10 satellites)
-static uint8_t buzz_countSats[22];
+//static uint8_t buzz_countSats[22];
 
 // Current Buzzer mode
 static uint8_t buzzerMode = BUZZER_STOPPED;
 // Buzzer off = 0 Buzzer on = 1
 static uint8_t buzzerIsOn = 0;
 // Pointer to current sequence
-static const uint8_t *buzzerPtr = NULL;
+static const uint8_t* buzzerPtr = NULL;
 // Place in current sequence
 static uint16_t buzzerPos = 0;
 // Time when buzzer routine must act next time
@@ -79,7 +79,7 @@ static void buzzerCalculations(void);
  */
 void buzzer(uint8_t mode)
 {
-    uint8_t i = 0;
+    //uint8_t i = 0;
 
     // Just return if same or higher priority sound is active.
     if (buzzerMode <= mode)
@@ -137,20 +137,6 @@ void buzzer(uint8_t mode)
             buzzerNextToggleTime = 0;
             break;
         case BUZZER_TX_SET:
-#ifdef GPS
-            if (feature(FEATURE_GPS) && f.GPS_FIX && GPS_numSat >= 5) {
-                do {
-                    buzz_countSats[i] = 5;
-                    buzz_countSats[i + 1] = 15;
-                    i += 2;
-                } while (i < 20 && GPS_numSat > i / 2);
-                buzz_countSats[i + 1] = 100;
-                buzz_countSats[i + 2] = 0xFF;
-                buzzerPtr = buzz_countSats;
-                buzzerMode = mode;
-                break;
-            }
-#endif
             buzzerPtr = buzz_shortBeep;
             buzzerMode = mode;
             break;
